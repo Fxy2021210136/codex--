@@ -81,6 +81,14 @@ export function deleteSavedProject(id:string){
   return request<{deleted:boolean}>(`/api/projects/${encodeURIComponent(id)}`,{method:'DELETE'})
 }
 
+export async function loadServerCustomTemplates(){
+  return (await request<{templates:TaskTemplate[];updatedAt?:string}>('/api/templates')).templates
+}
+
+export async function saveServerCustomTemplates(templates:TaskTemplate[]){
+  return (await request<{templates:TaskTemplate[];updatedAt:string}>('/api/templates',{method:'PUT',body:JSON.stringify({templates})})).templates
+}
+
 export interface ServerAiConfig extends AiSettings {
   configured: boolean
   maskedKey: string

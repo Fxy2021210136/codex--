@@ -25,6 +25,7 @@ DATA_DIR = Path(os.environ.get("APP_DATA_DIR", str(PROJECT_ROOT / "data")))
 DATA_FILE = DATA_DIR / "projects.json"
 AI_SETTINGS_FILE = DATA_DIR / "ai-settings.json"
 AUTH_FILE = DATA_DIR / "auth.json"
+TEMPLATES_FILE = DATA_DIR / "templates.json"
 SESSION_COOKIE = "schedule_ai_session"
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", str(60 * 60 * 24 * 30)))
 SUPPORTED_AI_PROVIDERS = {"deepseek", "gemini", "openai"}
@@ -135,6 +136,76 @@ class ProjectStore:
             if existed:
                 self._write(data)
             return existed
+
+
+class UserTemplateStore:
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.RLock()
+
+    def _read(self):
+        if not self.path.exists():
+            return {"schemaVersion": 1, "owners": {}}
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(data.get("owners"), dict):
+                raise ValueError("owners must be an object")
+            return data
+        except (json.JSONDecodeError, OSError, ValueError):
+            return {"schemaVersion": 1, "owners": {}}
+
+    def _write(self, data):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(self.path)
+
+    @staticmethod
+    def _clean_template(item, index=0):
+        if not isinstance(item, dict):
+            raise ValueError("templates must contain objects")
+        name = str(item.get("name", "")).strip()
+        if not name:
+            raise ValueError("template name is required")
+        duration = item.get("duration", 1)
+        try:
+            duration = max(1, int(duration))
+        except (TypeError, ValueError):
+            raise ValueError("template duration must be a number")
+        template_id = str(item.get("id") or f"CUSTOM-SERVER-{int(time.time() * 1000)}-{index + 1}").strip()
+        cleaned = {**item, "id": template_id[:120], "name": name[:160], "duration": duration, "isCustom": True}
+        cleaned["predecessorNames"] = [str(value).strip()[:160] for value in item.get("predecessorNames", []) if str(value).strip()][:20]
+        cleaned["resourceDemand"] = [str(value).strip()[:120] for value in item.get("resourceDemand", []) if str(value).strip()][:40]
+        cleaned["materialNodes"] = [str(value).strip()[:120] for value in item.get("materialNodes", []) if str(value).strip()][:40]
+        cleaned["expansionDimensions"] = [str(value).strip()[:80] for value in item.get("expansionDimensions", []) if str(value).strip()][:10]
+        if cleaned.get("relationType") not in {"FS", "SS", "FF", "SF"}:
+            cleaned["relationType"] = "FS"
+        try:
+            cleaned["lag"] = int(cleaned.get("lag", 0))
+        except (TypeError, ValueError):
+            cleaned["lag"] = 0
+        return cleaned
+
+    def list(self, owner):
+        with self.lock:
+            owner_data = self._read()["owners"].get(owner, {})
+            templates = owner_data.get("templates", [])
+            return {"templates": templates if isinstance(templates, list) else [], "updatedAt": owner_data.get("updatedAt", "")}
+
+    def replace(self, owner, templates):
+        if not isinstance(templates, list):
+            raise ValueError("templates must be a list")
+        if len(templates) > 500:
+            raise ValueError("最多保存 500 项自定义模板")
+        cleaned = [self._clean_template(item, index) for index, item in enumerate(templates)]
+        deduped = {}
+        for item in cleaned:
+            deduped[item["id"]] = item
+        with self.lock:
+            data = self._read()
+            data["owners"][owner] = {"templates": list(deduped.values()), "updatedAt": utc_now()}
+            self._write(data)
+            return self.list(owner)
 
 
 class AuthStore:
@@ -475,6 +546,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     store = ProjectStore(DATA_FILE)
     ai_store = AiConfigStore(AI_SETTINGS_FILE)
     auth_store = AuthStore(AUTH_FILE)
+    template_store = UserTemplateStore(TEMPLATES_FILE)
     admin_token = os.environ.get("ADMIN_TOKEN", "")
     allow_local_admin = True
     allowed_origins = {value.strip() for value in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if value.strip()}
@@ -587,6 +659,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             return self._send_json(200, {"ok": all(item["tcp443"] for item in checks), "checkedAt": utc_now(), "checks": checks})
         if path == "/api/projects":
             return self._send_json(200, {"projects": self.store.list(self._client_id())})
+        if path == "/api/templates":
+            return self._send_json(200, self.template_store.list(self._client_id()))
         if path == "/api/settings/ai":
             return self._send_json(200, self.ai_store.public())
         project_id = self._project_id()
@@ -596,6 +670,13 @@ class AppHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_PUT(self):
+        if urlparse(self.path).path == "/api/templates":
+            try:
+                payload = self._read_json()
+                templates = payload if isinstance(payload, list) else payload.get("templates") if isinstance(payload, dict) else None
+                return self._send_json(200, self.template_store.replace(self._client_id(), templates))
+            except (ValueError, json.JSONDecodeError) as error:
+                return self._send_json(400, {"error": str(error)})
         if urlparse(self.path).path == "/api/settings/ai":
             if not self._is_admin():
                 return self._send_json(403, {"error": "仅管理员可以修改 AI 配置"})
@@ -670,7 +751,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             return self._send_json(502, {"error": "无法连接模型服务"})
 
 
-def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, codex_agent=None):
+def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, codex_agent=None):
     configured_admin_token = os.environ.get("ADMIN_TOKEN", "") if admin_token is None else admin_token
     configured_origins = AppHandler.allowed_origins if allowed_origins is None else set(allowed_origins)
     configured_rate_limit = ai_rate_limit if ai_rate_limit is not None else os.environ.get("AI_RATE_LIMIT_PER_MINUTE", "30")
@@ -679,6 +760,7 @@ def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None,
         store = ProjectStore(Path(data_file) if data_file else DATA_FILE)
         ai_store = AiConfigStore(Path(ai_settings_file) if ai_settings_file else AI_SETTINGS_FILE)
         auth_store = AuthStore(Path(auth_file) if auth_file else AUTH_FILE)
+        template_store = UserTemplateStore(Path(templates_file) if templates_file else TEMPLATES_FILE)
         admin_token = configured_admin_token
         allow_local_admin = host in {"127.0.0.1", "::1", "localhost"}
         allowed_origins = configured_origins

@@ -36,7 +36,7 @@ class ProjectApiTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
         (root / "index.html").write_text("ok", encoding="utf-8")
-        self.server = create_server(port=0, static_root=root, data_file=root / "projects.json", ai_settings_file=root / "ai-settings.json", auth_file=root / "auth.json")
+        self.server = create_server(port=0, static_root=root, data_file=root / "projects.json", ai_settings_file=root / "ai-settings.json", auth_file=root / "auth.json", templates_file=root / "templates.json")
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
@@ -204,6 +204,34 @@ class ProjectApiTest(unittest.TestCase):
         with self.assertRaises(HTTPError) as hidden:
             self.request("/api/projects/P-PRIVATE", headers=client_b)
         self.assertEqual(hidden.exception.code, 404)
+
+    def test_custom_templates_are_saved_per_user_or_guest_owner(self):
+        self.server.RequestHandlerClass.allow_local_admin = False
+        client_a={"X-Client-Id":"web-template-a"}
+        client_b={"X-Client-Id":"web-template-b"}
+        template = {
+            "id": "CUSTOM-TPL-1",
+            "name": "企业样板工序",
+            "phase": "样板阶段",
+            "discipline": "土建",
+            "duration": 3,
+            "predecessorNames": ["施工准备"],
+            "relationType": "SS",
+            "lag": 2,
+            "resourceDemand": ["木工班组"],
+            "materialNodes": ["模板验收"],
+            "expansionDimensions": ["楼栋"],
+        }
+        _, saved = self.request("/api/templates", "PUT", {"templates": [template]}, client_a)
+        self.assertEqual(saved["templates"][0]["name"], "企业样板工序")
+        self.assertTrue(saved["templates"][0]["isCustom"])
+        self.assertEqual(saved["templates"][0]["relationType"], "SS")
+
+        _, own = self.request("/api/templates", headers=client_a)
+        _, other = self.request("/api/templates", headers=client_b)
+        self.assertEqual(len(own["templates"]), 1)
+        self.assertEqual(other["templates"], [])
+        self.assertTrue((Path(self.temp.name) / "templates.json").exists())
 
     def test_public_ai_configuration_requires_admin_token(self):
         self.server.RequestHandlerClass.allow_local_admin = False

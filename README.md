@@ -32,6 +32,7 @@
 - 项目与任务本地保存
 - 本机服务端项目库：多项目保存、打开、删除及刷新恢复
 - `/api/projects` 同源 CRUD API，数据原子写入 `data/projects.json`
+- `/api/templates` 用户级自定义工序模板库，按登录账号或访客 ID 隔离保存到后端
 - Excel 五表工作簿导出（项目概览、WBS、资源负荷、风险审查、计划基准）
 - CSV 导出
 - DeepSeek / Gemini 服务端代理，API Key 脱敏读取且不再进入浏览器模型请求
@@ -67,4 +68,4 @@ python -m unittest tests.test_server -v
 
 ## 安全提示
 
-AI API Key 保存在本机配置文件或部署平台 Secret 中；浏览器只读取脱敏后的末四位，并通过同源 `/api/ai/chat` 调用模型。公网部署必须设置 `ADMIN_TOKEN`、HTTPS、持久磁盘和模型消费上限。当前已支持基础邮箱密码登录，但仍建议在正式保存机密工程数据前继续补充数据库迁移、审计日志、备份和企业级权限。
+AI API Key 保存在本机配置文件或部署平台 Secret 中；浏览器只读取脱敏后的末四位，并通过同源 `/api/ai/chat` 调用模型。项目、账号和用户级自定义工序模板分别保存在 `data/projects.json`、`data/auth.json` 和 `data/templates.json`。公网部署必须设置 `ADMIN_TOKEN`、HTTPS、持久磁盘和模型消费上限。当前已支持基础邮箱密码登录，但仍建议在正式保存机密工程数据前继续补充数据库迁移、审计日志、备份和企业级权限。

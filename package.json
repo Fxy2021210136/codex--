@@ -1,0 +1,24 @@
+{
+  "name": "construction-schedule-ai",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 4173",
+    "build": "node node_modules/typescript/bin/tsc -b && node node_modules/vite/bin/vite.js build .",
+    "test": "node --experimental-strip-types --experimental-specifier-resolution=node --test tests/*.test.ts",
+    "preview": "node node_modules/vite/bin/vite.js preview --host 127.0.0.1 --port 4173"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest"
+  }
+}

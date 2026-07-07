@@ -1,0 +1,11 @@
+.git
+.github
+node_modules
+dist
+__pycache__
+tests/__pycache__
+data/*.json
+data/*.tmp
+.env*
+*.tsbuildinfo
+

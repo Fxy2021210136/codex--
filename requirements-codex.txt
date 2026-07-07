@@ -1,0 +1,2 @@
+# Optional local-only integration. The official Python SDK currently publishes beta builds.
+openai-codex

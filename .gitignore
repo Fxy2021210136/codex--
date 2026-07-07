@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+__pycache__/
+tests/__pycache__/
+.env
+.env.*
+!.env.example
+.venv/
+data/*.json
+data/*.tmp
+!data/.gitkeep
+

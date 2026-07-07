@@ -1,0 +1,20 @@
+services:
+  schedule-ai:
+    build:
+      context: .
+      args:
+        VITE_PUBLIC_DEPLOYMENT: "true"
+    ports:
+      - "4173:4173"
+    env_file:
+      - .env
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_DATA_DIR: /data
+    volumes:
+      - schedule-data:/data
+    restart: unless-stopped
+
+volumes:
+  schedule-data:
+

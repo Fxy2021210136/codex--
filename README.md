@@ -40,6 +40,7 @@
 - 可选 Codex 本机智能体桥接：管理员专用、默认只读沙箱，支持官方 Python SDK或 `codex exec` 回退
 - 管理员运营概览：统计 SQLite 存储、注册用户、项目、模板、活跃会话和集成状态
 - 邮箱密码注册登录、服务端 Session Cookie、登录用户项目隔离和匿名访客兜底模式
+- 登录用户可自助导出账号数据，也可删除账号、项目、模板和会话
 - `ADMIN_EMAILS` 登录管理员角色和 `PROJECT_LIMIT_PER_OWNER` 每用户项目数量限制
 - `AI_DAILY_LIMIT_PER_OWNER` 每用户每日 AI 调用额度，运营概览统计今日成功/失败调用
 - AI 管理令牌和分钟级调用限流

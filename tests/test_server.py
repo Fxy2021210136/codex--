@@ -315,6 +315,32 @@ class ProjectApiTest(unittest.TestCase):
         self.assertEqual(overview["aiUsage"]["todayTotal"], 2)
         self.assertEqual(overview["aiUsage"]["todaySuccess"], 2)
 
+    def test_account_export_and_delete_remove_user_owned_data(self):
+        _, registered, headers = self.request_raw(
+            "/api/auth/register",
+            "POST",
+            {"email": "delete-me@example.com", "password": "securepass1", "name": "待删除用户"},
+        )
+        self.assertTrue(registered["authenticated"])
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        auth_headers = {"Cookie": cookie}
+        self.request("/api/projects/P-DELETE-ME", "PUT", {"project": {"projectName": "待导出项目"}, "tasks": [], "baselines": []}, auth_headers)
+        self.request("/api/templates", "PUT", {"templates": [{"id": "T-DELETE", "name": "待导出模板", "duration": 1}]}, auth_headers)
+
+        _, exported = self.request("/api/account/export", headers=auth_headers)
+        self.assertEqual(exported["user"]["email"], "delete-me@example.com")
+        self.assertEqual(exported["projects"][0]["project"]["projectName"], "待导出项目")
+        self.assertEqual(exported["templates"][0]["name"], "待导出模板")
+
+        status, deleted, delete_headers = self.request_raw("/api/account", "DELETE", headers=auth_headers)
+        self.assertEqual(status, 200)
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual(deleted["projects"], 1)
+        self.assertIn("Max-Age=0", delete_headers["Set-Cookie"])
+        with self.assertRaises(HTTPError) as after_delete:
+            self.request("/api/account/export", headers=auth_headers)
+        self.assertEqual(after_delete.exception.code, 401)
+
 
 if __name__ == "__main__":
     unittest.main()

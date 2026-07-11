@@ -77,6 +77,23 @@ export function logoutAccount(){
   return request<AuthStatus>('/api/auth/logout',{method:'POST'})
 }
 
+export interface AccountExport {
+  exportedAt: string
+  user: AuthUser
+  owner: string
+  projects: SavedProjectRecord[]
+  templates: TaskTemplate[]
+  templateUpdatedAt?: string
+}
+
+export function exportAccountData(){
+  return request<AccountExport>('/api/account/export')
+}
+
+export function deleteAccountData(){
+  return request<{deleted:boolean;projects:number;templates:number}>('/api/account',{method:'DELETE'})
+}
+
 export async function listSavedProjects(){
   return (await request<{projects:ProjectSummary[]}>('/api/projects')).projects
 }

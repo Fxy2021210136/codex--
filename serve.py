@@ -276,6 +276,20 @@ class ProjectStore:
                 self._write(data)
             return existed
 
+    def export_owner(self, owner="local"):
+        with self.lock:
+            return [item for item in self._read()["projects"].values() if item.get("owner", "local") == owner]
+
+    def delete_owner(self, owner="local"):
+        with self.lock:
+            data = self._read()
+            keys = [key for key, item in data["projects"].items() if item.get("owner", "local") == owner]
+            for key in keys:
+                data["projects"].pop(key, None)
+            if keys:
+                self._write(data)
+            return len(keys)
+
 
 class UserTemplateStore:
     def __init__(self, path: Path):
@@ -345,6 +359,15 @@ class UserTemplateStore:
             data["owners"][owner] = {"templates": list(deduped.values()), "updatedAt": utc_now()}
             self._write(data)
             return self.list(owner)
+
+    def delete_owner(self, owner):
+        with self.lock:
+            data = self._read()
+            existed = owner in data["owners"]
+            data["owners"].pop(owner, None)
+            if existed:
+                self._write(data)
+            return 1 if existed else 0
 
 
 class AuthStore:
@@ -471,6 +494,16 @@ class AuthStore:
             if token in data["sessions"]:
                 data["sessions"].pop(token, None)
                 self._write(data)
+
+    def delete_user(self, user_id):
+        with self.lock:
+            data = self._read()
+            existed = user_id in data["users"]
+            data["users"].pop(user_id, None)
+            data["sessions"] = {token: session for token, session in data.get("sessions", {}).items() if session.get("userId") != user_id}
+            if existed:
+                self._write(data)
+            return existed
 
 
 class RateLimiter:
@@ -653,6 +686,20 @@ class DatabaseProjectStore:
             connection.commit()
             return cursor.rowcount > 0
 
+    def export_owner(self, owner="local"):
+        with self.database.lock, self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM projects WHERE owner = ? ORDER BY updated_at DESC",
+                (owner,),
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
+
+    def delete_owner(self, owner="local"):
+        with self.database.lock, self.database.connect() as connection:
+            cursor = connection.execute("DELETE FROM projects WHERE owner = ?", (owner,))
+            connection.commit()
+            return cursor.rowcount
+
 
 class DatabaseUserTemplateStore:
     _clean_template = staticmethod(UserTemplateStore._clean_template)
@@ -694,6 +741,12 @@ class DatabaseUserTemplateStore:
             )
             connection.commit()
         return self.list(owner)
+
+    def delete_owner(self, owner):
+        with self.database.lock, self.database.connect() as connection:
+            cursor = connection.execute("DELETE FROM user_templates WHERE owner = ?", (owner,))
+            connection.commit()
+            return cursor.rowcount
 
 
 class DatabaseAuthStore:
@@ -787,6 +840,12 @@ class DatabaseAuthStore:
         with self.database.lock, self.database.connect() as connection:
             connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
             connection.commit()
+
+    def delete_user(self, user_id):
+        with self.database.lock, self.database.connect() as connection:
+            cursor = connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            connection.commit()
+            return cursor.rowcount > 0
 
 
 class DatabaseAiConfigStore:
@@ -1335,6 +1394,20 @@ class AppHandler(SimpleHTTPRequestHandler):
             user = self._current_user()
             owner = self._client_id()
             return self._send_json(200, {"authenticated": bool(user), "user": user, "owner": owner, "projectQuota": self._project_quota(owner), "aiQuota": self._ai_quota(owner)})
+        if path == "/api/account/export":
+            user = self._current_user()
+            if not user:
+                return self._send_json(401, {"error": "请先登录后导出账号数据"})
+            owner = f"user:{user['id']}"
+            templates = self.template_store.list(owner)
+            return self._send_json(200, {
+                "exportedAt": utc_now(),
+                "user": user,
+                "owner": owner,
+                "projects": self.store.export_owner(owner) if hasattr(self.store, "export_owner") else [],
+                "templates": templates.get("templates", []),
+                "templateUpdatedAt": templates.get("updatedAt", ""),
+            })
         if path == "/api/integrations":
             return self._send_json(200, {"ai": self.ai_store.public(), "codex": self.codex_agent.public()})
         if path == "/api/diagnostics/connectivity":
@@ -1399,6 +1472,15 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return self._send_json(403, {"error": "仅管理员可以清除 AI 配置"})
             self.ai_store.delete()
             return self._send_json(200, {"deleted": True})
+        if urlparse(self.path).path == "/api/account":
+            user = self._current_user()
+            if not user:
+                return self._send_json(401, {"error": "请先登录后删除账号"})
+            owner = f"user:{user['id']}"
+            deleted_projects = self.store.delete_owner(owner) if hasattr(self.store, "delete_owner") else 0
+            deleted_templates = self.template_store.delete_owner(owner) if hasattr(self.template_store, "delete_owner") else 0
+            self.auth_store.delete_user(user["id"])
+            return self._send_json(200, {"deleted": True, "projects": deleted_projects, "templates": deleted_templates}, {"Set-Cookie": self._clear_session_cookie()})
         project_id = self._project_id()
         if project_id is None:
             return self._send_json(404, {"error": "not found"})

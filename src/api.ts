@@ -17,6 +17,7 @@ export interface SavedProjectRecord extends SavedProjectPayload {
   id: string
   createdAt: string
   updatedAt: string
+  projectQuota?: ProjectQuota
 }
 
 export interface ProjectSummary {
@@ -40,13 +41,22 @@ export interface AuthUser {
   id: string
   email: string
   name: string
+  role?: 'user' | 'admin'
   createdAt: string
+}
+
+export interface ProjectQuota {
+  limit: number
+  used: number
+  remaining: number | null
+  exempt: boolean
 }
 
 export interface AuthStatus {
   authenticated: boolean
   user: AuthUser | null
   owner?: string
+  projectQuota?: ProjectQuota
 }
 
 export function loadAuthStatus(){
@@ -140,6 +150,7 @@ export interface AdminOverview {
   generatedAt: string
   storage: {engine:'sqlite'|'json';label:string;path:string;exists:boolean;sizeBytes:number;updatedAt:string}
   counts: {users:number;projects:number;activeSessions:number;templateOwners:number;customTemplates:number}
+  limits: {projectLimitPerOwner:number}
   integrations: {aiConfigured:boolean;codexReady:boolean;codexRuntime:string}
   recentProjects: {id:string;owner:string;name:string;updatedAt:string}[]
 }

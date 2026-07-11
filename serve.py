@@ -41,8 +41,17 @@ TEMPLATES_FILE = DATA_DIR / "templates.json"
 DB_FILE = sqlite_file_from_environment()
 SESSION_COOKIE = "schedule_ai_session"
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", str(60 * 60 * 24 * 30)))
+PROJECT_LIMIT_PER_OWNER = int(os.environ.get("PROJECT_LIMIT_PER_OWNER", "20"))
 SUPPORTED_AI_PROVIDERS = {"deepseek", "gemini", "openai"}
 AI_PROVIDER_HOSTS = {"deepseek": "api.deepseek.com", "gemini": "generativelanguage.googleapis.com", "openai": "api.openai.com"}
+
+
+def configured_admin_emails():
+    return {value.strip().lower() for value in os.environ.get("ADMIN_EMAILS", "").split(",") if value.strip()}
+
+
+def role_for_email(email, fallback="user"):
+    return "admin" if str(email or "").strip().lower() in configured_admin_emails() else fallback
 
 
 def utc_now():
@@ -129,6 +138,7 @@ class SQLiteDatabase:
                   email TEXT NOT NULL UNIQUE,
                   name TEXT NOT NULL,
                   password_hash TEXT NOT NULL,
+                  role TEXT NOT NULL DEFAULT 'user',
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -157,6 +167,9 @@ class SQLiteDatabase:
                   updated_at TEXT NOT NULL
                 );
                 """)
+                columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+                if "role" not in columns:
+                    connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
                 connection.commit()
             self.ready = True
 
@@ -205,6 +218,10 @@ class ProjectStore:
         with self.lock:
             record = self._read()["projects"].get(project_id)
             return record if record and record.get("owner", "local") == owner else None
+
+    def count(self, owner="local"):
+        with self.lock:
+            return len([item for item in self._read()["projects"].values() if item.get("owner", "local") == owner])
 
     def save(self, project_id, payload, owner="local"):
         if not project_id or len(project_id) > 100:
@@ -347,6 +364,7 @@ class AuthStore:
             "id": user["id"],
             "email": user["email"],
             "name": user.get("name") or user["email"].split("@")[0],
+            "role": role_for_email(user["email"], user.get("role", "user")),
             "createdAt": user.get("createdAt", ""),
         }
 
@@ -386,6 +404,7 @@ class AuthStore:
                 "email": email,
                 "name": name,
                 "passwordHash": self._hash_password(password),
+                "role": role_for_email(email),
                 "createdAt": utc_now(),
                 "updatedAt": utc_now(),
             }
@@ -553,6 +572,10 @@ class DatabaseProjectStore:
             ).fetchone()
         return self._row_to_record(row)
 
+    def count(self, owner="local"):
+        with self.database.lock, self.database.connect() as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM projects WHERE owner = ?", (owner,)).fetchone()[0])
+
     def save(self, project_id, payload, owner="local"):
         if not project_id or len(project_id) > 100:
             raise ValueError("invalid project id")
@@ -662,10 +685,12 @@ class DatabaseAuthStore:
 
     @staticmethod
     def _public_user(user):
+        role = role_for_email(user.get("email"), user.get("role", "user"))
         return {
             "id": user["id"],
             "email": user["email"],
             "name": user.get("name") or user["email"].split("@")[0],
+            "role": role,
             "createdAt": user.get("createdAt") or user.get("created_at") or "",
         }
 
@@ -684,6 +709,7 @@ class DatabaseAuthStore:
             "email": email,
             "name": name,
             "password_hash": AuthStore._hash_password(password),
+            "role": role_for_email(email),
             "created_at": now,
             "updated_at": now,
         }
@@ -691,8 +717,8 @@ class DatabaseAuthStore:
             if connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
                 raise ValueError("该邮箱已注册")
             connection.execute(
-                "INSERT INTO users(id, email, name, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (user["id"], user["email"], user["name"], user["password_hash"], user["created_at"], user["updated_at"]),
+                "INSERT INTO users(id, email, name, password_hash, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user["id"], user["email"], user["name"], user["password_hash"], user["role"], user["created_at"], user["updated_at"]),
             )
             connection.commit()
         return self._public_user(user)
@@ -723,7 +749,7 @@ class DatabaseAuthStore:
         with self.database.lock, self.database.connect() as connection:
             row = connection.execute(
                 """
-                SELECT users.id, users.email, users.name, users.created_at, sessions.expires_at
+                SELECT users.id, users.email, users.name, users.role, users.created_at, sessions.expires_at
                 FROM sessions
                 JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token = ?
@@ -853,14 +879,15 @@ def migrate_json_files_to_sqlite(database, data_file=DATA_FILE, ai_settings_file
                     continue
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO users(id, email, name, password_hash, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO users(id, email, name, password_hash, role, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         user.get("id") or user_id,
                         user.get("email"),
                         user.get("name") or str(user.get("email")).split("@")[0],
                         user.get("passwordHash"),
+                        role_for_email(user.get("email"), user.get("role", "user")),
                         user.get("createdAt") or utc_now(),
                         user.get("updatedAt") or user.get("createdAt") or utc_now(),
                     ),
@@ -1117,9 +1144,17 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def _is_admin(self):
         supplied = self.headers.get("X-Admin-Token", "")
-        if self.admin_token:
-            return bool(supplied and hmac.compare_digest(supplied, self.admin_token))
-        return self.allow_local_admin and self.client_address[0] in {"127.0.0.1", "::1"}
+        token_ok = bool(self.admin_token and supplied and hmac.compare_digest(supplied, self.admin_token))
+        user = self._current_user()
+        role_ok = bool(user and user.get("role") == "admin")
+        local_ok = self.allow_local_admin and self.client_address[0] in {"127.0.0.1", "::1"}
+        return token_ok or role_ok or (local_ok and not self.admin_token)
+
+    def _project_quota(self, owner):
+        count = self.store.count(owner) if hasattr(self.store, "count") else len(self.store.list(owner))
+        exempt = owner == "local" or self._is_admin()
+        limit = 0 if exempt else max(1, int(getattr(self, "project_limit_per_owner", PROJECT_LIMIT_PER_OWNER)))
+        return {"limit": limit, "used": count, "remaining": None if exempt else max(0, limit - count), "exempt": exempt}
 
     def _send_json(self, status, payload, headers=None):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -1173,6 +1208,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "templateOwners": len(template_rows),
                     "customTemplates": template_items,
                 },
+                "limits": {
+                    "projectLimitPerOwner": max(1, int(getattr(self, "project_limit_per_owner", PROJECT_LIMIT_PER_OWNER))),
+                },
                 "integrations": {
                     "aiConfigured": ai_configured,
                     "codexReady": self.codex_agent.public().get("ready", False),
@@ -1202,6 +1240,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "templateOwners": len(templates_data),
                 "customTemplates": sum(len(owner.get("templates", [])) for owner in templates_data.values() if isinstance(owner, dict)),
             },
+            "limits": {
+                "projectLimitPerOwner": max(1, int(getattr(self, "project_limit_per_owner", PROJECT_LIMIT_PER_OWNER))),
+            },
             "integrations": {
                 "aiConfigured": self.ai_store.public().get("configured", False),
                 "codexReady": self.codex_agent.public().get("ready", False),
@@ -1216,7 +1257,8 @@ class AppHandler(SimpleHTTPRequestHandler):
             return self._send_json(200, {"ok": True, "storage": self.storage_label, "publicReady": bool(self.admin_token), "auth": True, "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
         if path == "/api/auth/me":
             user = self._current_user()
-            return self._send_json(200, {"authenticated": bool(user), "user": user, "owner": self._client_id()})
+            owner = self._client_id()
+            return self._send_json(200, {"authenticated": bool(user), "user": user, "owner": owner, "projectQuota": self._project_quota(owner)})
         if path == "/api/integrations":
             return self._send_json(200, {"ai": self.ai_store.public(), "codex": self.codex_agent.public()})
         if path == "/api/diagnostics/connectivity":
@@ -1265,7 +1307,13 @@ class AppHandler(SimpleHTTPRequestHandler):
         if project_id is None:
             return self._send_json(404, {"error": "not found"})
         try:
-            return self._send_json(200, self.store.save(project_id, self._read_json(), self._client_id()))
+            owner = self._client_id()
+            if not self.store.get(project_id, owner):
+                quota = self._project_quota(owner)
+                if not quota["exempt"] and quota["remaining"] == 0:
+                    return self._send_json(409, {"error": f"项目数量已达到上限（{quota['used']}/{quota['limit']}）。请删除旧项目或联系管理员提高配额。", "projectQuota": quota})
+            record = self.store.save(project_id, self._read_json(), owner)
+            return self._send_json(200, {**record, "projectQuota": self._project_quota(owner)})
         except (ValueError, json.JSONDecodeError) as error:
             return self._send_json(400, {"error": str(error)})
 
@@ -1328,10 +1376,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             return self._send_json(502, {"error": "无法连接模型服务"})
 
 
-def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, database_file=None, use_sqlite=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, codex_agent=None):
+def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, database_file=None, use_sqlite=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, project_limit_per_owner=None, codex_agent=None):
     configured_admin_token = os.environ.get("ADMIN_TOKEN", "") if admin_token is None else admin_token
     configured_origins = AppHandler.allowed_origins if allowed_origins is None else set(allowed_origins)
     configured_rate_limit = ai_rate_limit if ai_rate_limit is not None else os.environ.get("AI_RATE_LIMIT_PER_MINUTE", "30")
+    configured_project_limit = project_limit_per_owner if project_limit_per_owner is not None else os.environ.get("PROJECT_LIMIT_PER_OWNER", str(PROJECT_LIMIT_PER_OWNER))
     configured_codex_agent = codex_agent or CodexAgent()
     legacy_file_mode = any(value is not None for value in (data_file, ai_settings_file, auth_file, templates_file))
     use_database = (not legacy_file_mode) if use_sqlite is None else bool(use_sqlite)
@@ -1354,6 +1403,7 @@ def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None,
         allow_local_admin = host in {"127.0.0.1", "::1", "localhost"}
         allowed_origins = configured_origins
         ai_limiter = RateLimiter(configured_rate_limit)
+        project_limit_per_owner = int(configured_project_limit)
         codex_agent = configured_codex_agent
 
         def __init__(self, *args, **kwargs):

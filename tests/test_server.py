@@ -271,6 +271,27 @@ class ProjectApiTest(unittest.TestCase):
         _, authorized = self.request("/api/admin/overview", headers={"X-Admin-Token": "admin-secret"})
         self.assertIn("counts", authorized)
 
+    def test_project_quota_blocks_new_projects_but_allows_updates(self):
+        self.server.RequestHandlerClass.allow_local_admin = False
+        self.server.RequestHandlerClass.project_limit_per_owner = 1
+        client = {"X-Client-Id": "web-quota-user"}
+        payload = {"project": {"projectName": "配额内项目"}, "tasks": [], "baselines": []}
+        self.request("/api/projects/P-QUOTA-1", "PUT", payload, client)
+        self.request("/api/projects/P-QUOTA-1", "PUT", {"project": {"projectName": "允许更新"}, "tasks": [], "baselines": []}, client)
+        with self.assertRaises(HTTPError) as limited:
+            self.request("/api/projects/P-QUOTA-2", "PUT", {"project": {"projectName": "超限项目"}, "tasks": [], "baselines": []}, client)
+        self.assertEqual(limited.exception.code, 409)
+
+    def test_admin_email_role_can_access_admin_overview(self):
+        with patch.dict("os.environ", {"ADMIN_EMAILS": "boss@example.com"}):
+            _, registered, headers = self.request_raw("/api/auth/register", "POST", {"email": "boss@example.com", "password": "securepass1", "name": "站点管理员"})
+        self.assertEqual(registered["user"]["role"], "admin")
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.server.RequestHandlerClass.allow_local_admin = False
+        self.server.RequestHandlerClass.admin_token = "admin-secret"
+        _, overview = self.request("/api/admin/overview", headers={"Cookie": cookie})
+        self.assertIn("limits", overview)
+
 
 if __name__ == "__main__":
     unittest.main()

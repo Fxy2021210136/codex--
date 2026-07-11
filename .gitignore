@@ -13,4 +13,5 @@ data/*.db
 data/*.db-*
 data/*.sqlite
 data/*.sqlite-*
+backups/
 !data/.gitkeep

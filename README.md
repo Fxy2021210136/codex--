@@ -49,6 +49,25 @@ node node_modules/typescript/bin/tsc -b --force
 node node_modules/vite/bin/vite.js build .
 ```
 
+## 本机运行与备份
+
+```powershell
+.\scripts\start-local.ps1 -Build
+```
+
+默认访问 <http://127.0.0.1:4173/>，数据保存到 `data/app.db`。需要临时给别人访问时，保持本机服务运行，再开一个 PowerShell：
+
+```powershell
+.\scripts\start-tunnel.ps1
+```
+
+备份和恢复 SQLite 数据库：
+
+```powershell
+.\scripts\backup-db.ps1
+.\scripts\restore-db.ps1 -BackupFile .\backups\app-YYYYMMDD-HHMMSS.db -Force
+```
+
 ## 测试
 
 ```powershell

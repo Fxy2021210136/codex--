@@ -461,6 +461,23 @@ class AuthStore:
                     return self._public_user(user)
         raise ValueError("邮箱或密码不正确")
 
+    def change_password(self, user_id, current_password, new_password):
+        new_password = str(new_password or "")
+        if len(new_password) < 8:
+            raise ValueError("新密码至少 8 位")
+        with self.lock:
+            data = self._read()
+            user = data["users"].get(user_id)
+            if not user:
+                raise ValueError("用户不存在")
+            if not self._verify_password(str(current_password or ""), user.get("passwordHash", "")):
+                raise ValueError("当前密码不正确")
+            user["passwordHash"] = self._hash_password(new_password)
+            user["updatedAt"] = utc_now()
+            data["users"][user_id] = user
+            self._write(data)
+            return self._public_user(user)
+
     def create_session(self, user_id):
         token = secrets.token_urlsafe(32)
         with self.lock:
@@ -523,6 +540,32 @@ class RateLimiter:
             recent.append(now)
             self.events[key] = recent
             return True
+
+
+class FailedLoginLimiter:
+    def __init__(self, limit=6, window_seconds=15 * 60):
+        self.limit = max(1, int(limit))
+        self.window_seconds = window_seconds
+        self.lock = threading.Lock()
+        self.failures = {}
+
+    def blocked(self, key):
+        now = time.time()
+        with self.lock:
+            recent = [stamp for stamp in self.failures.get(key, []) if now - stamp < self.window_seconds]
+            self.failures[key] = recent
+            return len(recent) >= self.limit
+
+    def record_failure(self, key):
+        now = time.time()
+        with self.lock:
+            recent = [stamp for stamp in self.failures.get(key, []) if now - stamp < self.window_seconds]
+            recent.append(now)
+            self.failures[key] = recent
+
+    def reset(self, key):
+        with self.lock:
+            self.failures.pop(key, None)
 
 
 class AiConfigStore:
@@ -800,6 +843,25 @@ class DatabaseAuthStore:
         if row and AuthStore._verify_password(str(password or ""), row["password_hash"]):
             return self._public_user(dict(row))
         raise ValueError("邮箱或密码不正确")
+
+    def change_password(self, user_id, current_password, new_password):
+        new_password = str(new_password or "")
+        if len(new_password) < 8:
+            raise ValueError("新密码至少 8 位")
+        with self.database.lock, self.database.connect() as connection:
+            row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not row:
+                raise ValueError("用户不存在")
+            if not AuthStore._verify_password(str(current_password or ""), row["password_hash"]):
+                raise ValueError("当前密码不正确")
+            connection.execute(
+                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+                (AuthStore._hash_password(new_password), utc_now(), user_id),
+            )
+            connection.execute("DELETE FROM sessions WHERE user_id = ? AND token <> ''", (user_id,))
+            connection.commit()
+            updated = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return self._public_user(dict(updated))
 
     def create_session(self, user_id):
         token = secrets.token_urlsafe(32)
@@ -1160,6 +1222,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     allow_local_admin = True
     allowed_origins = {value.strip() for value in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if value.strip()}
     ai_limiter = RateLimiter(os.environ.get("AI_RATE_LIMIT_PER_MINUTE", "30"))
+    login_limiter = FailedLoginLimiter(os.environ.get("LOGIN_FAILURE_LIMIT_PER_15_MINUTES", "6"))
     codex_agent = CodexAgent()
 
     def __init__(self, *args, directory=None, **kwargs):
@@ -1496,16 +1559,37 @@ class AppHandler(SimpleHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError) as error:
                 return self._send_json(400, {"error": str(error)})
         if path == "/api/auth/login":
+            payload = {}
             try:
                 payload = self._read_json()
+                email = AuthStore._normalize_email(payload.get("email"))
+                login_key = f"{self.client_address[0]}:{email}"
+                if self.login_limiter.blocked(login_key):
+                    return self._send_json(429, {"error": "登录失败次数过多，请稍后再试"})
                 user = self.auth_store.authenticate(payload.get("email"), payload.get("password"))
+                self.login_limiter.reset(login_key)
                 token = self.auth_store.create_session(user["id"])
                 return self._send_json(200, {"authenticated": True, "user": user}, {"Set-Cookie": self._session_cookie(token)})
             except (ValueError, json.JSONDecodeError) as error:
+                try:
+                    self.login_limiter.record_failure(f"{self.client_address[0]}:{AuthStore._normalize_email(payload.get('email'))}")
+                except Exception:
+                    pass
                 return self._send_json(401, {"error": str(error)})
         if path == "/api/auth/logout":
             self.auth_store.logout(self._session_token())
             return self._send_json(200, {"authenticated": False, "user": None}, {"Set-Cookie": self._clear_session_cookie()})
+        if path == "/api/account/password":
+            user = self._current_user()
+            if not user:
+                return self._send_json(401, {"error": "请先登录后修改密码"})
+            try:
+                payload = self._read_json()
+                updated = self.auth_store.change_password(user["id"], payload.get("currentPassword"), payload.get("newPassword"))
+                token = self.auth_store.create_session(updated["id"])
+                return self._send_json(200, {"authenticated": True, "user": updated}, {"Set-Cookie": self._session_cookie(token)})
+            except (ValueError, json.JSONDecodeError) as error:
+                return self._send_json(400, {"error": str(error)})
         if path == "/api/codex/run":
             if not self._is_admin():
                 return self._send_json(403, {"error": "仅管理员可以调用 Codex 智能体"})
@@ -1544,12 +1628,13 @@ class AppHandler(SimpleHTTPRequestHandler):
             return self._send_json(502, {"error": "无法连接模型服务"})
 
 
-def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, database_file=None, use_sqlite=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, project_limit_per_owner=None, ai_daily_limit_per_owner=None, codex_agent=None):
+def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, database_file=None, use_sqlite=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, project_limit_per_owner=None, ai_daily_limit_per_owner=None, login_failure_limit=None, codex_agent=None):
     configured_admin_token = os.environ.get("ADMIN_TOKEN", "") if admin_token is None else admin_token
     configured_origins = AppHandler.allowed_origins if allowed_origins is None else set(allowed_origins)
     configured_rate_limit = ai_rate_limit if ai_rate_limit is not None else os.environ.get("AI_RATE_LIMIT_PER_MINUTE", "30")
     configured_project_limit = project_limit_per_owner if project_limit_per_owner is not None else os.environ.get("PROJECT_LIMIT_PER_OWNER", str(PROJECT_LIMIT_PER_OWNER))
     configured_ai_daily_limit = ai_daily_limit_per_owner if ai_daily_limit_per_owner is not None else os.environ.get("AI_DAILY_LIMIT_PER_OWNER", str(AI_DAILY_LIMIT_PER_OWNER))
+    configured_login_failure_limit = login_failure_limit if login_failure_limit is not None else os.environ.get("LOGIN_FAILURE_LIMIT_PER_15_MINUTES", "6")
     configured_codex_agent = codex_agent or CodexAgent()
     legacy_file_mode = any(value is not None for value in (data_file, ai_settings_file, auth_file, templates_file))
     use_database = (not legacy_file_mode) if use_sqlite is None else bool(use_sqlite)
@@ -1572,6 +1657,7 @@ def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None,
         allow_local_admin = host in {"127.0.0.1", "::1", "localhost"}
         allowed_origins = configured_origins
         ai_limiter = RateLimiter(configured_rate_limit)
+        login_limiter = FailedLoginLimiter(configured_login_failure_limit)
         project_limit_per_owner = int(configured_project_limit)
         ai_daily_limit_per_owner = int(configured_ai_daily_limit)
         codex_agent = configured_codex_agent

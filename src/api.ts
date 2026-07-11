@@ -94,6 +94,10 @@ export function deleteAccountData(){
   return request<{deleted:boolean;projects:number;templates:number}>('/api/account',{method:'DELETE'})
 }
 
+export function changeAccountPassword(payload:{currentPassword:string;newPassword:string}){
+  return request<AuthStatus>('/api/account/password',{method:'POST',body:JSON.stringify(payload)})
+}
+
 export async function listSavedProjects(){
   return (await request<{projects:ProjectSummary[]}>('/api/projects')).projects
 }

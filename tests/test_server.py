@@ -123,6 +123,38 @@ class ProjectApiTest(unittest.TestCase):
         self.assertTrue(logged_in["authenticated"])
         self.assertIn("schedule_ai_session=", login_headers["Set-Cookie"])
 
+    def test_change_password_requires_current_password_and_rotates_login_secret(self):
+        _, registered, headers = self.request_raw(
+            "/api/auth/register",
+            "POST",
+            {"email": "change@example.com", "password": "oldpass123", "name": "改密用户"},
+        )
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertTrue(registered["authenticated"])
+        with self.assertRaises(HTTPError) as wrong_current:
+            self.request("/api/account/password", "POST", {"currentPassword": "badpass", "newPassword": "newpass123"}, {"Cookie": cookie})
+        self.assertEqual(wrong_current.exception.code, 400)
+        status, changed, changed_headers = self.request_raw("/api/account/password", "POST", {"currentPassword": "oldpass123", "newPassword": "newpass123"}, {"Cookie": cookie})
+        self.assertEqual(status, 200)
+        self.assertTrue(changed["authenticated"])
+        self.assertIn("schedule_ai_session=", changed_headers["Set-Cookie"])
+        with self.assertRaises(HTTPError) as old_login:
+            self.request("/api/auth/login", "POST", {"email": "change@example.com", "password": "oldpass123"})
+        self.assertEqual(old_login.exception.code, 401)
+        _, new_login = self.request("/api/auth/login", "POST", {"email": "change@example.com", "password": "newpass123"})
+        self.assertTrue(new_login["authenticated"])
+
+    def test_login_failures_are_rate_limited(self):
+        self.server.RequestHandlerClass.login_limiter = __import__("serve").FailedLoginLimiter(limit=2, window_seconds=60)
+        self.request("/api/auth/register", "POST", {"email": "limit@example.com", "password": "securepass1", "name": "限制用户"})
+        for _ in range(2):
+            with self.assertRaises(HTTPError) as failed:
+                self.request("/api/auth/login", "POST", {"email": "limit@example.com", "password": "wrongpass"})
+            self.assertEqual(failed.exception.code, 401)
+        with self.assertRaises(HTTPError) as limited:
+            self.request("/api/auth/login", "POST", {"email": "limit@example.com", "password": "wrongpass"})
+        self.assertEqual(limited.exception.code, 429)
+
     def test_rejects_invalid_payload(self):
         with self.assertRaises(HTTPError) as invalid:
             self.request("/api/projects/P-BAD", "PUT", {"tasks": []})

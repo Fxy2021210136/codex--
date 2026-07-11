@@ -327,6 +327,21 @@ class ProjectApiTest(unittest.TestCase):
         _, overview = self.request("/api/admin/overview", headers={"Cookie": cookie})
         self.assertIn("limits", overview)
 
+    def test_readiness_check_requires_admin_and_reports_core_status(self):
+        self.server.RequestHandlerClass.allow_local_admin = False
+        self.server.RequestHandlerClass.admin_token = "admin-secret"
+        with self.assertRaises(HTTPError) as forbidden:
+            self.request("/api/readiness")
+        self.assertEqual(forbidden.exception.code, 403)
+
+        _, readiness = self.request("/api/readiness", headers={"X-Admin-Token": "admin-secret"})
+        self.assertTrue(readiness["ready"])
+        checks = {item["key"]: item for item in readiness["checks"]}
+        self.assertEqual(checks["storageWritable"]["level"], "ok")
+        self.assertEqual(checks["database"]["level"], "ok")
+        self.assertEqual(checks["adminToken"]["level"], "ok")
+        self.assertIn("warningCount", readiness)
+
     @patch("serve.call_ai_provider")
     def test_ai_daily_quota_records_usage_and_blocks_when_exhausted(self, mocked_ai):
         mocked_ai.return_value = {"summary": "ok"}

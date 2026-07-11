@@ -1457,6 +1457,64 @@ class AppHandler(SimpleHTTPRequestHandler):
             "recentTemplates": [{"owner": owner, "count": len(item.get("templates", [])) if isinstance(item, dict) else 0, "updatedAt": item.get("updatedAt", "") if isinstance(item, dict) else ""} for owner, item in recent_templates],
         }
 
+    def _readiness_overview(self):
+        checks = []
+
+        def add(key, label, level, detail, required=False):
+            checks.append({"key": key, "label": label, "level": level, "detail": detail, "required": required})
+
+        database = getattr(self.store, "database", None)
+        storage_path = Path(database.path) if database else Path(getattr(self.store, "path", DATA_FILE))
+        storage_parent = storage_path.parent
+        try:
+            storage_parent.mkdir(parents=True, exist_ok=True)
+            probe = storage_parent / f".readiness-{secrets.token_hex(4)}.tmp"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            add("storageWritable", "数据目录可写", "ok", f"{storage_parent} 可写，项目和账号数据可持久保存。", True)
+        except OSError as error:
+            add("storageWritable", "数据目录可写", "error", f"{storage_parent} 不可写：{error}", True)
+
+        try:
+            if database:
+                with database.lock, database.connect() as connection:
+                    connection.execute("SELECT COUNT(*) FROM projects").fetchone()
+                add("database", "数据库连接", "ok", "SQLite 数据库可连接，核心表结构已初始化。", True)
+            else:
+                add("database", "数据库连接", "warning", "当前使用 JSON 文件存储；多人长期使用建议切换 SQLite。", False)
+        except (OSError, sqlite3.Error) as error:
+            add("database", "数据库连接", "error", f"数据库不可用：{error}", True)
+
+        if self.admin_token:
+            add("adminToken", "管理员令牌", "ok", "ADMIN_TOKEN 已配置，公网后台和模型设置受保护。", True)
+        else:
+            add("adminToken", "管理员令牌", "warning", "未配置 ADMIN_TOKEN；本机可调试，公网部署前必须设置。", True)
+
+        if os.environ.get("APP_SECURE_COOKIES", "").strip() in {"1", "true", "TRUE", "yes"}:
+            add("secureCookies", "安全 Cookie", "ok", "APP_SECURE_COOKIES 已启用，适合 HTTPS 部署。")
+        else:
+            add("secureCookies", "安全 Cookie", "warning", "未启用 APP_SECURE_COOKIES；公网 HTTPS 部署时建议设置为 1。")
+
+        ai_public = self.ai_store.public()
+        if ai_public.get("configured"):
+            add("aiConfig", "AI 服务", "ok", f"{ai_public.get('provider')} / {ai_public.get('model')} 已配置。")
+        else:
+            add("aiConfig", "AI 服务", "warning", "未配置 AI_API_KEY；系统会退回本地规则模式。")
+
+        add("quotas", "使用额度", "ok", f"项目上限 {self.project_limit_per_owner}，AI 每日上限 {self.ai_daily_limit_per_owner}，分钟限流已启用。")
+
+        codex_public = self.codex_agent.public()
+        if codex_public.get("ready"):
+            add("codex", "Codex 智能体", "ok", f"Codex 可用：{codex_public.get('runtime')} / {codex_public.get('sandbox')}。")
+        elif codex_public.get("enabled"):
+            add("codex", "Codex 智能体", "warning", "已启用 Codex，但运行时不可用；普通用户不受影响。")
+        else:
+            add("codex", "Codex 智能体", "ok", "Codex 默认关闭，公共站点保持安全边界。")
+
+        required_errors = [item for item in checks if item["required"] and item["level"] == "error"]
+        warnings = [item for item in checks if item["level"] == "warning"]
+        return {"generatedAt": utc_now(), "ready": not required_errors, "warningCount": len(warnings), "checks": checks}
+
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
@@ -1496,6 +1554,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             if not self._is_admin():
                 return self._send_json(403, {"error": "仅管理员可以查看运营概览"})
             return self._send_json(200, self._admin_overview())
+        if path == "/api/readiness":
+            if not self._is_admin():
+                return self._send_json(403, {"error": "仅管理员可以查看上线检查"})
+            return self._send_json(200, self._readiness_overview())
         if path == "/api/projects":
             return self._send_json(200, {"projects": self.store.list(self._client_id())})
         if path == "/api/templates":

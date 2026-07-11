@@ -169,6 +169,17 @@ export function loadConnectivityDiagnostics(adminToken?:string){
   return request<ConnectivityDiagnostics>('/api/diagnostics/connectivity',{headers:adminToken?{'X-Admin-Token':adminToken}:undefined})
 }
 
+export interface ReadinessStatus {
+  generatedAt: string
+  ready: boolean
+  warningCount: number
+  checks: {key:string;label:string;level:'ok'|'warning'|'error';detail:string;required:boolean}[]
+}
+
+export function loadReadinessStatus(adminToken?:string){
+  return request<ReadinessStatus>('/api/readiness',{headers:adminToken?{'X-Admin-Token':adminToken}:undefined})
+}
+
 export interface AdminOverview {
   generatedAt: string
   storage: {engine:'sqlite'|'json';label:string;path:string;exists:boolean;sizeBytes:number;updatedAt:string}

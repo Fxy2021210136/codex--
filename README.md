@@ -39,6 +39,7 @@
 - OpenAI Responses API 服务端代理，可与 DeepSeek、Gemini 在设置页切换
 - 可选 Codex 本机智能体桥接：管理员专用、默认只读沙箱，支持官方 Python SDK或 `codex exec` 回退
 - 管理员运营概览：统计 SQLite 存储、注册用户、项目、模板、活跃会话、最近用户/项目/模板和集成状态
+- 管理员上线健康检查：检查数据目录可写、数据库可连接、ADMIN_TOKEN、HTTPS Cookie、AI 配置、额度和 Codex 状态
 - 邮箱密码注册登录、服务端 Session Cookie、登录用户项目隔离和匿名访客兜底模式
 - 登录用户可自助导出账号数据，也可删除账号、项目、模板和会话
 - 登录用户可修改密码；登录失败会按邮箱和 IP 做短期限制

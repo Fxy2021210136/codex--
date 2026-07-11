@@ -1143,6 +1143,73 @@ class AppHandler(SimpleHTTPRequestHandler):
         prefix = "/api/projects/"
         return unquote(path[len(prefix):]) if path.startswith(prefix) else None
 
+    def _admin_overview(self):
+        database = getattr(self.store, "database", None)
+        if database:
+            with database.lock, database.connect() as connection:
+                projects = connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+                users = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                sessions = connection.execute("SELECT COUNT(*) FROM sessions WHERE expires_at > ?", (time.time(),)).fetchone()[0]
+                template_rows = connection.execute("SELECT templates_json FROM user_templates").fetchall()
+                ai_configured = bool(connection.execute("SELECT 1 FROM ai_settings WHERE id = 1").fetchone() or os.environ.get("AI_API_KEY", "").strip())
+                recent_rows = connection.execute("SELECT id, owner, name, updated_at FROM projects ORDER BY updated_at DESC LIMIT 5").fetchall()
+            template_items = sum(len(_json_decode(row["templates_json"], [])) for row in template_rows)
+            storage_path = Path(database.path)
+            storage_exists = storage_path.exists()
+            return {
+                "generatedAt": utc_now(),
+                "storage": {
+                    "engine": "sqlite",
+                    "label": self.storage_label,
+                    "path": str(storage_path),
+                    "exists": storage_exists,
+                    "sizeBytes": storage_path.stat().st_size if storage_exists else 0,
+                    "updatedAt": datetime.fromtimestamp(storage_path.stat().st_mtime, timezone.utc).isoformat() if storage_exists else "",
+                },
+                "counts": {
+                    "users": users,
+                    "projects": projects,
+                    "activeSessions": sessions,
+                    "templateOwners": len(template_rows),
+                    "customTemplates": template_items,
+                },
+                "integrations": {
+                    "aiConfigured": ai_configured,
+                    "codexReady": self.codex_agent.public().get("ready", False),
+                    "codexRuntime": self.codex_agent.public().get("runtime", "unavailable"),
+                },
+                "recentProjects": [{"id": row["id"], "owner": row["owner"], "name": row["name"], "updatedAt": row["updated_at"]} for row in recent_rows],
+            }
+        projects_data = self.store._read().get("projects", {}) if hasattr(self.store, "_read") else {}
+        templates_data = self.template_store._read().get("owners", {}) if hasattr(self.template_store, "_read") else {}
+        auth_data = self.auth_store._read() if hasattr(self.auth_store, "_read") else {"users": {}, "sessions": {}}
+        storage_path = getattr(self.store, "path", DATA_FILE)
+        storage_exists = Path(storage_path).exists()
+        return {
+            "generatedAt": utc_now(),
+            "storage": {
+                "engine": "json",
+                "label": self.storage_label,
+                "path": str(storage_path),
+                "exists": storage_exists,
+                "sizeBytes": Path(storage_path).stat().st_size if storage_exists else 0,
+                "updatedAt": datetime.fromtimestamp(Path(storage_path).stat().st_mtime, timezone.utc).isoformat() if storage_exists else "",
+            },
+            "counts": {
+                "users": len(auth_data.get("users", {})),
+                "projects": len(projects_data),
+                "activeSessions": len([s for s in auth_data.get("sessions", {}).values() if float(s.get("expiresAt", 0)) > time.time()]),
+                "templateOwners": len(templates_data),
+                "customTemplates": sum(len(owner.get("templates", [])) for owner in templates_data.values() if isinstance(owner, dict)),
+            },
+            "integrations": {
+                "aiConfigured": self.ai_store.public().get("configured", False),
+                "codexReady": self.codex_agent.public().get("ready", False),
+                "codexRuntime": self.codex_agent.public().get("runtime", "unavailable"),
+            },
+            "recentProjects": sorted([{"id": item.get("id", ""), "owner": item.get("owner", ""), "name": item.get("project", {}).get("projectName", ""), "updatedAt": item.get("updatedAt", "")} for item in projects_data.values()], key=lambda item: item["updatedAt"], reverse=True)[:5],
+        }
+
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
@@ -1163,6 +1230,10 @@ class AppHandler(SimpleHTTPRequestHandler):
                     hosts.append(provider_host)
             checks = [check_tcp_endpoint(host) for host in hosts]
             return self._send_json(200, {"ok": all(item["tcp443"] for item in checks), "checkedAt": utc_now(), "checks": checks})
+        if path == "/api/admin/overview":
+            if not self._is_admin():
+                return self._send_json(403, {"error": "仅管理员可以查看运营概览"})
+            return self._send_json(200, self._admin_overview())
         if path == "/api/projects":
             return self._send_json(200, {"projects": self.store.list(self._client_id())})
         if path == "/api/templates":

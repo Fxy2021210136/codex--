@@ -251,6 +251,26 @@ class ProjectApiTest(unittest.TestCase):
         _, configured=self.request("/api/settings/ai", "PUT", payload, {"X-Admin-Token":"admin-secret"})
         self.assertTrue(configured["configured"])
 
+    def test_admin_overview_reports_database_counts_and_requires_admin(self):
+        self.request("/api/auth/register", "POST", {"email": "ops@example.com", "password": "securepass1", "name": "运维"})
+        self.request("/api/projects/P-OPS", "PUT", {"project": {"projectName": "运营统计项目"}, "tasks": []})
+        self.request("/api/templates", "PUT", {"templates": [{"id": "OPS-TPL", "name": "统计模板", "duration": 2}]})
+        _, overview = self.request("/api/admin/overview")
+        self.assertEqual(overview["storage"]["engine"], "sqlite")
+        self.assertGreaterEqual(overview["counts"]["users"], 1)
+        self.assertGreaterEqual(overview["counts"]["projects"], 1)
+        self.assertGreaterEqual(overview["counts"]["customTemplates"], 1)
+        self.assertTrue(overview["storage"]["exists"])
+        self.assertEqual(overview["recentProjects"][0]["name"], "运营统计项目")
+
+        self.server.RequestHandlerClass.allow_local_admin = False
+        self.server.RequestHandlerClass.admin_token = "admin-secret"
+        with self.assertRaises(HTTPError) as forbidden:
+            self.request("/api/admin/overview")
+        self.assertEqual(forbidden.exception.code, 403)
+        _, authorized = self.request("/api/admin/overview", headers={"X-Admin-Token": "admin-secret"})
+        self.assertIn("counts", authorized)
+
 
 if __name__ == "__main__":
     unittest.main()

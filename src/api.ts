@@ -135,3 +135,15 @@ export interface ConnectivityDiagnostics {
 export function loadConnectivityDiagnostics(adminToken?:string){
   return request<ConnectivityDiagnostics>('/api/diagnostics/connectivity',{headers:adminToken?{'X-Admin-Token':adminToken}:undefined})
 }
+
+export interface AdminOverview {
+  generatedAt: string
+  storage: {engine:'sqlite'|'json';label:string;path:string;exists:boolean;sizeBytes:number;updatedAt:string}
+  counts: {users:number;projects:number;activeSessions:number;templateOwners:number;customTemplates:number}
+  integrations: {aiConfigured:boolean;codexReady:boolean;codexRuntime:string}
+  recentProjects: {id:string;owner:string;name:string;updatedAt:string}[]
+}
+
+export function loadAdminOverview(adminToken?:string){
+  return request<AdminOverview>('/api/admin/overview',{headers:adminToken?{'X-Admin-Token':adminToken}:undefined})
+}

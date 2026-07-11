@@ -38,6 +38,7 @@
 - DeepSeek / Gemini 服务端代理，API Key 脱敏读取且不再进入浏览器模型请求
 - OpenAI Responses API 服务端代理，可与 DeepSeek、Gemini 在设置页切换
 - 可选 Codex 本机智能体桥接：管理员专用、默认只读沙箱，支持官方 Python SDK或 `codex exec` 回退
+- 管理员运营概览：统计 SQLite 存储、注册用户、项目、模板、活跃会话和集成状态
 - 邮箱密码注册登录、服务端 Session Cookie、登录用户项目隔离和匿名访客兜底模式
 - AI 管理令牌和分钟级调用限流
 - Docker 多阶段构建、GitHub Actions CI 与 GHCR 镜像发布

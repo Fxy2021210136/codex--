@@ -50,6 +50,7 @@ export interface ProjectQuota {
   used: number
   remaining: number | null
   exempt: boolean
+  window?: string
 }
 
 export interface AuthStatus {
@@ -57,6 +58,7 @@ export interface AuthStatus {
   user: AuthUser | null
   owner?: string
   projectQuota?: ProjectQuota
+  aiQuota?: ProjectQuota
 }
 
 export function loadAuthStatus(){
@@ -150,7 +152,8 @@ export interface AdminOverview {
   generatedAt: string
   storage: {engine:'sqlite'|'json';label:string;path:string;exists:boolean;sizeBytes:number;updatedAt:string}
   counts: {users:number;projects:number;activeSessions:number;templateOwners:number;customTemplates:number}
-  limits: {projectLimitPerOwner:number}
+  limits: {projectLimitPerOwner:number;aiDailyLimitPerOwner:number}
+  aiUsage: {todayTotal:number;todaySuccess:number;todayFailed:number;recent:{owner:string;provider:string;model:string;success:boolean;status:string;errorType:string;durationMs:number;createdAt:string}[]}
   integrations: {aiConfigured:boolean;codexReady:boolean;codexRuntime:string}
   recentProjects: {id:string;owner:string;name:string;updatedAt:string}[]
 }

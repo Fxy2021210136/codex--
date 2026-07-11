@@ -42,6 +42,7 @@ DB_FILE = sqlite_file_from_environment()
 SESSION_COOKIE = "schedule_ai_session"
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", str(60 * 60 * 24 * 30)))
 PROJECT_LIMIT_PER_OWNER = int(os.environ.get("PROJECT_LIMIT_PER_OWNER", "20"))
+AI_DAILY_LIMIT_PER_OWNER = int(os.environ.get("AI_DAILY_LIMIT_PER_OWNER", "20"))
 SUPPORTED_AI_PROVIDERS = {"deepseek", "gemini", "openai"}
 AI_PROVIDER_HOSTS = {"deepseek": "api.deepseek.com", "gemini": "generativelanguage.googleapis.com", "openai": "api.openai.com"}
 
@@ -166,6 +167,22 @@ class SQLiteDatabase:
                   api_key TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS ai_usage (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  owner TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  model TEXT NOT NULL,
+                  success INTEGER NOT NULL,
+                  status TEXT NOT NULL,
+                  error_type TEXT NOT NULL DEFAULT '',
+                  duration_ms INTEGER NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_ai_usage_owner_created
+                  ON ai_usage(owner, created_at);
+                CREATE INDEX IF NOT EXISTS idx_ai_usage_created
+                  ON ai_usage(created_at);
                 """)
                 columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
                 if "role" not in columns:
@@ -1156,6 +1173,61 @@ class AppHandler(SimpleHTTPRequestHandler):
         limit = 0 if exempt else max(1, int(getattr(self, "project_limit_per_owner", PROJECT_LIMIT_PER_OWNER)))
         return {"limit": limit, "used": count, "remaining": None if exempt else max(0, limit - count), "exempt": exempt}
 
+    def _today_start(self):
+        now = datetime.now(timezone.utc)
+        return now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    def _ai_usage_count(self, owner):
+        database = getattr(self.store, "database", None)
+        if not database:
+            return 0
+        with database.lock, database.connect() as connection:
+            return int(connection.execute(
+                "SELECT COUNT(*) FROM ai_usage WHERE owner = ? AND created_at >= ?",
+                (owner, self._today_start()),
+            ).fetchone()[0])
+
+    def _ai_quota(self, owner):
+        exempt = owner == "local" or self._is_admin()
+        used = self._ai_usage_count(owner)
+        limit = 0 if exempt else max(1, int(getattr(self, "ai_daily_limit_per_owner", AI_DAILY_LIMIT_PER_OWNER)))
+        return {"limit": limit, "used": used, "remaining": None if exempt else max(0, limit - used), "exempt": exempt, "window": "UTC_DAY"}
+
+    def _record_ai_usage(self, owner, config, success, status, started_at, error_type=""):
+        database = getattr(self.store, "database", None)
+        if not database:
+            return
+        duration_ms = max(0, int((time.time() - started_at) * 1000))
+        with database.lock, database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO ai_usage(owner, provider, model, success, status, error_type, duration_ms, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (owner, config.get("provider", ""), config.get("model", ""), 1 if success else 0, status, str(error_type or "")[:80], duration_ms, utc_now()),
+            )
+            connection.commit()
+
+    def _ai_usage_overview(self):
+        database = getattr(self.store, "database", None)
+        if not database:
+            return {"todayTotal": 0, "todaySuccess": 0, "todayFailed": 0, "recent": []}
+        with database.lock, database.connect() as connection:
+            today = self._today_start()
+            total, success = connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(success), 0) FROM ai_usage WHERE created_at >= ?",
+                (today,),
+            ).fetchone()
+            recent = connection.execute(
+                "SELECT owner, provider, model, success, status, error_type, duration_ms, created_at FROM ai_usage ORDER BY created_at DESC LIMIT 5"
+            ).fetchall()
+        return {
+            "todayTotal": int(total),
+            "todaySuccess": int(success),
+            "todayFailed": int(total) - int(success),
+            "recent": [{"owner": row["owner"], "provider": row["provider"], "model": row["model"], "success": bool(row["success"]), "status": row["status"], "errorType": row["error_type"], "durationMs": row["duration_ms"], "createdAt": row["created_at"]} for row in recent],
+        }
+
     def _send_json(self, status, payload, headers=None):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -1210,7 +1282,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                 },
                 "limits": {
                     "projectLimitPerOwner": max(1, int(getattr(self, "project_limit_per_owner", PROJECT_LIMIT_PER_OWNER))),
+                    "aiDailyLimitPerOwner": max(1, int(getattr(self, "ai_daily_limit_per_owner", AI_DAILY_LIMIT_PER_OWNER))),
                 },
+                "aiUsage": self._ai_usage_overview(),
                 "integrations": {
                     "aiConfigured": ai_configured,
                     "codexReady": self.codex_agent.public().get("ready", False),
@@ -1242,7 +1316,9 @@ class AppHandler(SimpleHTTPRequestHandler):
             },
             "limits": {
                 "projectLimitPerOwner": max(1, int(getattr(self, "project_limit_per_owner", PROJECT_LIMIT_PER_OWNER))),
+                "aiDailyLimitPerOwner": max(1, int(getattr(self, "ai_daily_limit_per_owner", AI_DAILY_LIMIT_PER_OWNER))),
             },
+            "aiUsage": self._ai_usage_overview(),
             "integrations": {
                 "aiConfigured": self.ai_store.public().get("configured", False),
                 "codexReady": self.codex_agent.public().get("ready", False),
@@ -1258,7 +1334,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         if path == "/api/auth/me":
             user = self._current_user()
             owner = self._client_id()
-            return self._send_json(200, {"authenticated": bool(user), "user": user, "owner": owner, "projectQuota": self._project_quota(owner)})
+            return self._send_json(200, {"authenticated": bool(user), "user": user, "owner": owner, "projectQuota": self._project_quota(owner), "aiQuota": self._ai_quota(owner)})
         if path == "/api/integrations":
             return self._send_json(200, {"ai": self.ai_store.public(), "codex": self.codex_agent.public()})
         if path == "/api/diagnostics/connectivity":
@@ -1364,23 +1440,34 @@ class AppHandler(SimpleHTTPRequestHandler):
         config = self.ai_store.get()
         if not config:
             return self._send_json(409, {"error": "AI 服务尚未配置"})
-        if not self.ai_limiter.allow(f"{self.client_address[0]}:{self._client_id()}"):
+        owner = self._client_id()
+        if not self.ai_limiter.allow(f"{self.client_address[0]}:{owner}"):
             return self._send_json(429, {"error": "AI 请求过于频繁，请稍后重试"})
+        quota = self._ai_quota(owner)
+        if not quota["exempt"] and quota["remaining"] == 0:
+            return self._send_json(429, {"error": f"今日 AI 调用额度已用完（{quota['used']}/{quota['limit']}）。请明天再试或联系管理员。", "aiQuota": quota})
+        started_at = time.time()
         try:
-            return self._send_json(200, call_ai_provider(config, self._read_json()))
+            result = call_ai_provider(config, self._read_json())
+            self._record_ai_usage(owner, config, True, "ok", started_at)
+            return self._send_json(200, {**result, "aiQuota": self._ai_quota(owner)})
         except (ValueError, json.JSONDecodeError) as error:
+            self._record_ai_usage(owner, config, False, "bad_request", started_at, type(error).__name__)
             return self._send_json(400, {"error": str(error)})
         except HTTPError as error:
+            self._record_ai_usage(owner, config, False, f"http_{error.code}", started_at, "HTTPError")
             return self._send_json(502, {"error": f"模型服务返回 HTTP {error.code}"})
         except (URLError, TimeoutError, OSError):
+            self._record_ai_usage(owner, config, False, "network_error", started_at, "NetworkError")
             return self._send_json(502, {"error": "无法连接模型服务"})
 
 
-def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, database_file=None, use_sqlite=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, project_limit_per_owner=None, codex_agent=None):
+def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, database_file=None, use_sqlite=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, project_limit_per_owner=None, ai_daily_limit_per_owner=None, codex_agent=None):
     configured_admin_token = os.environ.get("ADMIN_TOKEN", "") if admin_token is None else admin_token
     configured_origins = AppHandler.allowed_origins if allowed_origins is None else set(allowed_origins)
     configured_rate_limit = ai_rate_limit if ai_rate_limit is not None else os.environ.get("AI_RATE_LIMIT_PER_MINUTE", "30")
     configured_project_limit = project_limit_per_owner if project_limit_per_owner is not None else os.environ.get("PROJECT_LIMIT_PER_OWNER", str(PROJECT_LIMIT_PER_OWNER))
+    configured_ai_daily_limit = ai_daily_limit_per_owner if ai_daily_limit_per_owner is not None else os.environ.get("AI_DAILY_LIMIT_PER_OWNER", str(AI_DAILY_LIMIT_PER_OWNER))
     configured_codex_agent = codex_agent or CodexAgent()
     legacy_file_mode = any(value is not None for value in (data_file, ai_settings_file, auth_file, templates_file))
     use_database = (not legacy_file_mode) if use_sqlite is None else bool(use_sqlite)
@@ -1404,6 +1491,7 @@ def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None,
         allowed_origins = configured_origins
         ai_limiter = RateLimiter(configured_rate_limit)
         project_limit_per_owner = int(configured_project_limit)
+        ai_daily_limit_per_owner = int(configured_ai_daily_limit)
         codex_agent = configured_codex_agent
 
         def __init__(self, *args, **kwargs):

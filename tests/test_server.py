@@ -255,6 +255,7 @@ class ProjectApiTest(unittest.TestCase):
         self.request("/api/auth/register", "POST", {"email": "ops@example.com", "password": "securepass1", "name": "运维"})
         self.request("/api/projects/P-OPS", "PUT", {"project": {"projectName": "运营统计项目"}, "tasks": []})
         self.request("/api/templates", "PUT", {"templates": [{"id": "OPS-TPL", "name": "统计模板", "duration": 2}]})
+        self.server.RequestHandlerClass.allow_local_admin = True
         _, overview = self.request("/api/admin/overview")
         self.assertEqual(overview["storage"]["engine"], "sqlite")
         self.assertGreaterEqual(overview["counts"]["users"], 1)
@@ -291,6 +292,28 @@ class ProjectApiTest(unittest.TestCase):
         self.server.RequestHandlerClass.admin_token = "admin-secret"
         _, overview = self.request("/api/admin/overview", headers={"Cookie": cookie})
         self.assertIn("limits", overview)
+
+    @patch("serve.call_ai_provider")
+    def test_ai_daily_quota_records_usage_and_blocks_when_exhausted(self, mocked_ai):
+        mocked_ai.return_value = {"summary": "ok"}
+        self.server.RequestHandlerClass.ai_daily_limit_per_owner = 2
+        self.request("/api/settings/ai", "PUT", {"provider": "openai", "model": "gpt-5.4-mini", "apiKey": "sk-test"})
+        self.server.RequestHandlerClass.allow_local_admin = False
+        client = {"X-Client-Id": "web-ai-quota"}
+        payload = {"messages": [{"role": "user", "content": "test"}]}
+        _, first = self.request("/api/ai/chat", "POST", payload, client)
+        _, second = self.request("/api/ai/chat", "POST", payload, client)
+        self.assertEqual(first["summary"], "ok")
+        self.assertEqual(second["aiQuota"]["remaining"], 0)
+        with self.assertRaises(HTTPError) as limited:
+            self.request("/api/ai/chat", "POST", payload, client)
+        self.assertEqual(limited.exception.code, 429)
+
+        self.server.RequestHandlerClass.allow_local_admin = True
+        self.server.RequestHandlerClass.admin_token = ""
+        _, overview = self.request("/api/admin/overview")
+        self.assertEqual(overview["aiUsage"]["todayTotal"], 2)
+        self.assertEqual(overview["aiUsage"]["todaySuccess"], 2)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@
 - 管理员运营概览：统计 SQLite 存储、注册用户、项目、模板、活跃会话和集成状态
 - 邮箱密码注册登录、服务端 Session Cookie、登录用户项目隔离和匿名访客兜底模式
 - `ADMIN_EMAILS` 登录管理员角色和 `PROJECT_LIMIT_PER_OWNER` 每用户项目数量限制
+- `AI_DAILY_LIMIT_PER_OWNER` 每用户每日 AI 调用额度，运营概览统计今日成功/失败调用
 - AI 管理令牌和分钟级调用限流
 - Docker 多阶段构建、GitHub Actions CI 与 GHCR 镜像发布
 

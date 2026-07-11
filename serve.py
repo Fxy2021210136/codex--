@@ -1382,6 +1382,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 template_rows = connection.execute("SELECT templates_json FROM user_templates").fetchall()
                 ai_configured = bool(connection.execute("SELECT 1 FROM ai_settings WHERE id = 1").fetchone() or os.environ.get("AI_API_KEY", "").strip())
                 recent_rows = connection.execute("SELECT id, owner, name, updated_at FROM projects ORDER BY updated_at DESC LIMIT 5").fetchall()
+                recent_user_rows = connection.execute("SELECT id, email, name, role, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT 5").fetchall()
+                recent_template_rows = connection.execute("SELECT owner, templates_json, updated_at FROM user_templates ORDER BY updated_at DESC LIMIT 5").fetchall()
             template_items = sum(len(_json_decode(row["templates_json"], [])) for row in template_rows)
             storage_path = Path(database.path)
             storage_exists = storage_path.exists()
@@ -1413,10 +1415,14 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "codexRuntime": self.codex_agent.public().get("runtime", "unavailable"),
                 },
                 "recentProjects": [{"id": row["id"], "owner": row["owner"], "name": row["name"], "updatedAt": row["updated_at"]} for row in recent_rows],
+                "recentUsers": [{"id": row["id"], "email": row["email"], "name": row["name"], "role": row["role"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]} for row in recent_user_rows],
+                "recentTemplates": [{"owner": row["owner"], "count": len(_json_decode(row["templates_json"], [])), "updatedAt": row["updated_at"]} for row in recent_template_rows],
             }
         projects_data = self.store._read().get("projects", {}) if hasattr(self.store, "_read") else {}
         templates_data = self.template_store._read().get("owners", {}) if hasattr(self.template_store, "_read") else {}
         auth_data = self.auth_store._read() if hasattr(self.auth_store, "_read") else {"users": {}, "sessions": {}}
+        recent_users = sorted(auth_data.get("users", {}).values(), key=lambda item: item.get("createdAt", ""), reverse=True)[:5]
+        recent_templates = sorted(templates_data.items(), key=lambda item: item[1].get("updatedAt", "") if isinstance(item[1], dict) else "", reverse=True)[:5]
         storage_path = getattr(self.store, "path", DATA_FILE)
         storage_exists = Path(storage_path).exists()
         return {
@@ -1447,6 +1453,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "codexRuntime": self.codex_agent.public().get("runtime", "unavailable"),
             },
             "recentProjects": sorted([{"id": item.get("id", ""), "owner": item.get("owner", ""), "name": item.get("project", {}).get("projectName", ""), "updatedAt": item.get("updatedAt", "")} for item in projects_data.values()], key=lambda item: item["updatedAt"], reverse=True)[:5],
+            "recentUsers": [{"id": item.get("id", ""), "email": item.get("email", ""), "name": item.get("name", ""), "role": item.get("role", "user"), "createdAt": item.get("createdAt", ""), "updatedAt": item.get("updatedAt", "")} for item in recent_users],
+            "recentTemplates": [{"owner": owner, "count": len(item.get("templates", [])) if isinstance(item, dict) else 0, "updatedAt": item.get("updatedAt", "") if isinstance(item, dict) else ""} for owner, item in recent_templates],
         }
 
     def do_GET(self):

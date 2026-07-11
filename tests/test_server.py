@@ -295,6 +295,8 @@ class ProjectApiTest(unittest.TestCase):
         self.assertGreaterEqual(overview["counts"]["customTemplates"], 1)
         self.assertTrue(overview["storage"]["exists"])
         self.assertEqual(overview["recentProjects"][0]["name"], "运营统计项目")
+        self.assertEqual(overview["recentUsers"][0]["email"], "ops@example.com")
+        self.assertEqual(overview["recentTemplates"][0]["count"], 1)
 
         self.server.RequestHandlerClass.allow_local_admin = False
         self.server.RequestHandlerClass.admin_token = "admin-secret"

@@ -177,6 +177,8 @@ export interface AdminOverview {
   aiUsage: {todayTotal:number;todaySuccess:number;todayFailed:number;recent:{owner:string;provider:string;model:string;success:boolean;status:string;errorType:string;durationMs:number;createdAt:string}[]}
   integrations: {aiConfigured:boolean;codexReady:boolean;codexRuntime:string}
   recentProjects: {id:string;owner:string;name:string;updatedAt:string}[]
+  recentUsers: {id:string;email:string;name:string;role:'user'|'admin';createdAt:string;updatedAt:string}[]
+  recentTemplates: {owner:string;count:number;updatedAt:string}[]
 }
 
 export function loadAdminOverview(adminToken?:string){

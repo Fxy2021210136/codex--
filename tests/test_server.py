@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -36,7 +37,8 @@ class ProjectApiTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
         (root / "index.html").write_text("ok", encoding="utf-8")
-        self.server = create_server(port=0, static_root=root, data_file=root / "projects.json", ai_settings_file=root / "ai-settings.json", auth_file=root / "auth.json", templates_file=root / "templates.json")
+        self.db_file = root / "app.db"
+        self.server = create_server(port=0, static_root=root, database_file=self.db_file, use_sqlite=True)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
@@ -76,7 +78,10 @@ class ProjectApiTest(unittest.TestCase):
         _, loaded = self.request("/api/projects/P-TEST")
         self.assertEqual(loaded["tasks"][0]["id"], "A")
         self.assertEqual(loaded["customTemplates"][0]["id"], "CUSTOM-1")
-        self.assertTrue((Path(self.temp.name) / "projects.json").exists())
+        self.assertTrue(self.db_file.exists())
+        with sqlite3.connect(self.db_file) as db:
+            count = db.execute("SELECT COUNT(*) FROM projects WHERE id = 'P-TEST'").fetchone()[0]
+        self.assertEqual(count, 1)
 
         _, deleted = self.request("/api/projects/P-TEST", "DELETE")
         self.assertTrue(deleted["deleted"])
@@ -137,8 +142,9 @@ class ProjectApiTest(unittest.TestCase):
 
         _, public = self.request("/api/settings/ai")
         self.assertNotIn("apiKey", public)
-        stored = json.loads((Path(self.temp.name) / "ai-settings.json").read_text(encoding="utf-8"))
-        self.assertEqual(stored["apiKey"], "sk-test-secret")
+        with sqlite3.connect(self.db_file) as db:
+            stored = db.execute("SELECT api_key FROM ai_settings WHERE id = 1").fetchone()
+        self.assertEqual(stored[0], "sk-test-secret")
 
         _, removed = self.request("/api/settings/ai", "DELETE")
         self.assertTrue(removed["deleted"])
@@ -231,7 +237,9 @@ class ProjectApiTest(unittest.TestCase):
         _, other = self.request("/api/templates", headers=client_b)
         self.assertEqual(len(own["templates"]), 1)
         self.assertEqual(other["templates"], [])
-        self.assertTrue((Path(self.temp.name) / "templates.json").exists())
+        with sqlite3.connect(self.db_file) as db:
+            count = db.execute("SELECT COUNT(*) FROM user_templates WHERE owner = ?", (client_a["X-Client-Id"],)).fetchone()[0]
+        self.assertEqual(count, 1)
 
     def test_public_ai_configuration_requires_admin_token(self):
         self.server.RequestHandlerClass.allow_local_admin = False

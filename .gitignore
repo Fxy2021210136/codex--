@@ -9,5 +9,8 @@ tests/__pycache__/
 .venv/
 data/*.json
 data/*.tmp
+data/*.db
+data/*.db-*
+data/*.sqlite
+data/*.sqlite-*
 !data/.gitkeep
-

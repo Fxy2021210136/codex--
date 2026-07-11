@@ -7,6 +7,7 @@ import re
 import secrets
 import shutil
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -22,10 +23,22 @@ from urllib.parse import quote, unquote, urlparse
 PROJECT_ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = PROJECT_ROOT / "dist" if (PROJECT_ROOT / "dist").exists() else PROJECT_ROOT
 DATA_DIR = Path(os.environ.get("APP_DATA_DIR", str(PROJECT_ROOT / "data")))
+
+
+def sqlite_file_from_environment():
+    database_url = os.environ.get("DATABASE_URL", "").strip()
+    if database_url.startswith("sqlite:///"):
+        return Path(database_url[len("sqlite:///"):])
+    if database_url and not database_url.startswith("sqlite://"):
+        raise ValueError("DATABASE_URL currently supports sqlite:/// paths only")
+    return Path(os.environ.get("APP_DB_FILE") or (DATA_DIR / "app.db"))
+
+
 DATA_FILE = DATA_DIR / "projects.json"
 AI_SETTINGS_FILE = DATA_DIR / "ai-settings.json"
 AUTH_FILE = DATA_DIR / "auth.json"
 TEMPLATES_FILE = DATA_DIR / "templates.json"
+DB_FILE = sqlite_file_from_environment()
 SESSION_COOKIE = "schedule_ai_session"
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", str(60 * 60 * 24 * 30)))
 SUPPORTED_AI_PROVIDERS = {"deepseek", "gemini", "openai"}
@@ -58,6 +71,98 @@ def check_tcp_endpoint(host, port=443, timeout=.8):
         finally:
             connection.close()
     return {"host": host, "dns": bool(addresses), "tcp443": reachable, "addresses": addresses[:4]}
+
+
+def _json_encode(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_decode(value, fallback):
+    if value in (None, ""):
+        return fallback
+    try:
+        parsed = json.loads(value)
+        return parsed
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+class SQLiteDatabase:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.lock = threading.RLock()
+        self.ready = False
+
+    def _connect_raw(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(str(self.path), timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    def ensure_schema(self):
+        with self.lock:
+            if self.ready:
+                return
+            with self._connect_raw() as connection:
+                connection.executescript("""
+                PRAGMA journal_mode = WAL;
+
+                CREATE TABLE IF NOT EXISTS projects (
+                  owner TEXT NOT NULL,
+                  id TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  location TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  project_json TEXT NOT NULL,
+                  tasks_json TEXT NOT NULL,
+                  baselines_json TEXT NOT NULL,
+                  custom_templates_json TEXT NOT NULL,
+                  PRIMARY KEY (owner, id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_projects_owner_updated
+                  ON projects(owner, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS users (
+                  id TEXT PRIMARY KEY,
+                  email TEXT NOT NULL UNIQUE,
+                  name TEXT NOT NULL,
+                  password_hash TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS sessions (
+                  token TEXT PRIMARY KEY,
+                  user_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  expires_at REAL NOT NULL,
+                  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+                CREATE TABLE IF NOT EXISTS user_templates (
+                  owner TEXT PRIMARY KEY,
+                  templates_json TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS ai_settings (
+                  id INTEGER PRIMARY KEY CHECK (id = 1),
+                  provider TEXT NOT NULL,
+                  model TEXT NOT NULL,
+                  api_key TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                """)
+                connection.commit()
+            self.ready = True
+
+    def connect(self):
+        self.ensure_schema()
+        return self._connect_raw()
 
 
 class ProjectStore:
@@ -400,6 +505,406 @@ class AiConfigStore:
                 self.path.unlink()
 
 
+class DatabaseProjectStore:
+    def __init__(self, database: SQLiteDatabase):
+        self.database = database
+
+    @staticmethod
+    def _row_to_record(row):
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "owner": row["owner"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+            "project": _json_decode(row["project_json"], {}),
+            "tasks": _json_decode(row["tasks_json"], []),
+            "baselines": _json_decode(row["baselines_json"], []),
+            "customTemplates": _json_decode(row["custom_templates_json"], []),
+        }
+
+    def list(self, owner="local"):
+        with self.database.lock, self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM projects WHERE owner = ? ORDER BY updated_at DESC",
+                (owner,),
+            ).fetchall()
+        summaries = []
+        for row in rows:
+            project = _json_decode(row["project_json"], {})
+            tasks = _json_decode(row["tasks_json"], [])
+            summaries.append({
+                "id": row["id"],
+                "name": project.get("projectName", row["name"] or "未命名项目"),
+                "location": project.get("location", row["location"] or ""),
+                "updatedAt": row["updated_at"],
+                "createdAt": row["created_at"],
+                "taskCount": len(tasks),
+                "completionDate": tasks[-1].get("endDate", "") if tasks else "",
+            })
+        return summaries
+
+    def get(self, project_id, owner="local"):
+        with self.database.lock, self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM projects WHERE owner = ? AND id = ?",
+                (owner, project_id),
+            ).fetchone()
+        return self._row_to_record(row)
+
+    def save(self, project_id, payload, owner="local"):
+        if not project_id or len(project_id) > 100:
+            raise ValueError("invalid project id")
+        project, tasks = payload.get("project"), payload.get("tasks")
+        if not isinstance(project, dict) or not isinstance(tasks, list) or not project.get("projectName"):
+            raise ValueError("project and tasks are required")
+        now = utc_now()
+        with self.database.lock, self.database.connect() as connection:
+            conflict = connection.execute(
+                "SELECT 1 FROM projects WHERE id = ? AND owner <> ?",
+                (project_id, owner),
+            ).fetchone()
+            if conflict:
+                raise ValueError("project id is already in use")
+            previous = connection.execute(
+                "SELECT created_at FROM projects WHERE owner = ? AND id = ?",
+                (owner, project_id),
+            ).fetchone()
+            created_at = previous["created_at"] if previous else now
+            connection.execute(
+                """
+                INSERT INTO projects (
+                  owner, id, name, location, created_at, updated_at,
+                  project_json, tasks_json, baselines_json, custom_templates_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner, id) DO UPDATE SET
+                  name = excluded.name,
+                  location = excluded.location,
+                  updated_at = excluded.updated_at,
+                  project_json = excluded.project_json,
+                  tasks_json = excluded.tasks_json,
+                  baselines_json = excluded.baselines_json,
+                  custom_templates_json = excluded.custom_templates_json
+                """,
+                (
+                    owner,
+                    project_id,
+                    str(project.get("projectName", "未命名项目"))[:240],
+                    str(project.get("location", ""))[:240],
+                    created_at,
+                    now,
+                    _json_encode(project),
+                    _json_encode(tasks),
+                    _json_encode(payload.get("baselines", [])),
+                    _json_encode(payload.get("customTemplates", [])),
+                ),
+            )
+            connection.commit()
+        return self.get(project_id, owner)
+
+    def delete(self, project_id, owner="local"):
+        with self.database.lock, self.database.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM projects WHERE owner = ? AND id = ?",
+                (owner, project_id),
+            )
+            connection.commit()
+            return cursor.rowcount > 0
+
+
+class DatabaseUserTemplateStore:
+    _clean_template = staticmethod(UserTemplateStore._clean_template)
+
+    def __init__(self, database: SQLiteDatabase):
+        self.database = database
+
+    def list(self, owner):
+        with self.database.lock, self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT templates_json, updated_at FROM user_templates WHERE owner = ?",
+                (owner,),
+            ).fetchone()
+        if not row:
+            return {"templates": [], "updatedAt": ""}
+        templates = _json_decode(row["templates_json"], [])
+        return {"templates": templates if isinstance(templates, list) else [], "updatedAt": row["updated_at"]}
+
+    def replace(self, owner, templates):
+        if not isinstance(templates, list):
+            raise ValueError("templates must be a list")
+        if len(templates) > 500:
+            raise ValueError("最多保存 500 项自定义模板")
+        cleaned = [self._clean_template(item, index) for index, item in enumerate(templates)]
+        deduped = {}
+        for item in cleaned:
+            deduped[item["id"]] = item
+        now = utc_now()
+        with self.database.lock, self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_templates(owner, templates_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(owner) DO UPDATE SET
+                  templates_json = excluded.templates_json,
+                  updated_at = excluded.updated_at
+                """,
+                (owner, _json_encode(list(deduped.values())), now),
+            )
+            connection.commit()
+        return self.list(owner)
+
+
+class DatabaseAuthStore:
+    def __init__(self, database: SQLiteDatabase):
+        self.database = database
+
+    @staticmethod
+    def _public_user(user):
+        return {
+            "id": user["id"],
+            "email": user["email"],
+            "name": user.get("name") or user["email"].split("@")[0],
+            "createdAt": user.get("createdAt") or user.get("created_at") or "",
+        }
+
+    def create_user(self, payload):
+        email = AuthStore._normalize_email(payload.get("email"))
+        password = str(payload.get("password", ""))
+        name = str(payload.get("name", "")).strip()[:60] or email.split("@")[0]
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise ValueError("请输入有效邮箱")
+        if len(password) < 8:
+            raise ValueError("密码至少 8 位")
+        now = utc_now()
+        user_id = f"u_{secrets.token_urlsafe(12)}"
+        user = {
+            "id": user_id,
+            "email": email,
+            "name": name,
+            "password_hash": AuthStore._hash_password(password),
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self.database.lock, self.database.connect() as connection:
+            if connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
+                raise ValueError("该邮箱已注册")
+            connection.execute(
+                "INSERT INTO users(id, email, name, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (user["id"], user["email"], user["name"], user["password_hash"], user["created_at"], user["updated_at"]),
+            )
+            connection.commit()
+        return self._public_user(user)
+
+    def authenticate(self, email, password):
+        email = AuthStore._normalize_email(email)
+        with self.database.lock, self.database.connect() as connection:
+            row = connection.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        if row and AuthStore._verify_password(str(password or ""), row["password_hash"]):
+            return self._public_user(dict(row))
+        raise ValueError("邮箱或密码不正确")
+
+    def create_session(self, user_id):
+        token = secrets.token_urlsafe(32)
+        with self.database.lock, self.database.connect() as connection:
+            if not connection.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone():
+                raise ValueError("用户不存在")
+            connection.execute(
+                "INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                (token, user_id, utc_now(), time.time() + SESSION_TTL_SECONDS),
+            )
+            connection.commit()
+        return token
+
+    def user_from_session(self, token):
+        if not token:
+            return None
+        with self.database.lock, self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT users.id, users.email, users.name, users.created_at, sessions.expires_at
+                FROM sessions
+                JOIN users ON users.id = sessions.user_id
+                WHERE sessions.token = ?
+                """,
+                (token,),
+            ).fetchone()
+            if not row:
+                return None
+            if float(row["expires_at"]) < time.time():
+                connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
+                connection.commit()
+                return None
+            return self._public_user(dict(row))
+
+    def logout(self, token):
+        if not token:
+            return
+        with self.database.lock, self.database.connect() as connection:
+            connection.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            connection.commit()
+
+
+class DatabaseAiConfigStore:
+    def __init__(self, database: SQLiteDatabase):
+        self.database = database
+
+    def get(self):
+        env_key = os.environ.get("AI_API_KEY", "").strip()
+        if env_key:
+            provider = os.environ.get("AI_PROVIDER", "deepseek").strip()
+            model = os.environ.get("AI_MODEL", "deepseek-chat").strip()
+            if provider in SUPPORTED_AI_PROVIDERS and model:
+                return {"provider": provider, "model": model, "apiKey": env_key, "source": "environment"}
+        with self.database.lock, self.database.connect() as connection:
+            row = connection.execute("SELECT provider, model, api_key FROM ai_settings WHERE id = 1").fetchone()
+        if not row:
+            return None
+        if row["provider"] not in SUPPORTED_AI_PROVIDERS or not row["model"] or not row["api_key"]:
+            return None
+        return {"provider": row["provider"], "model": row["model"], "apiKey": row["api_key"], "source": "database"}
+
+    def public(self):
+        data = self.get()
+        if not data:
+            return {"configured": False, "provider": "deepseek", "model": "deepseek-chat", "maskedKey": ""}
+        key = data["apiKey"]
+        return {"configured": True, "provider": data["provider"], "model": data["model"], "maskedKey": f"••••{key[-4:]}"}
+
+    def save(self, payload):
+        provider = payload.get("provider")
+        model = str(payload.get("model", "")).strip()
+        api_key = str(payload.get("apiKey", "")).strip()
+        previous = self.get()
+        if not api_key and previous and previous.get("provider") == provider:
+            api_key = previous["apiKey"]
+        if provider not in SUPPORTED_AI_PROVIDERS or not model or not api_key:
+            raise ValueError("provider, model and apiKey are required")
+        now = utc_now()
+        with self.database.lock, self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO ai_settings(id, provider, model, api_key, updated_at)
+                VALUES (1, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  provider = excluded.provider,
+                  model = excluded.model,
+                  api_key = excluded.api_key,
+                  updated_at = excluded.updated_at
+                """,
+                (provider, model, api_key, now),
+            )
+            connection.commit()
+        return self.public()
+
+    def delete(self):
+        with self.database.lock, self.database.connect() as connection:
+            connection.execute("DELETE FROM ai_settings WHERE id = 1")
+            connection.commit()
+
+
+def migrate_json_files_to_sqlite(database, data_file=DATA_FILE, ai_settings_file=AI_SETTINGS_FILE, auth_file=AUTH_FILE, templates_file=TEMPLATES_FILE):
+    """Best-effort one-way import from earlier JSON stores. Existing SQLite rows win."""
+    database.ensure_schema()
+    with database.lock, database.connect() as connection:
+        if Path(data_file).exists():
+            try:
+                projects = json.loads(Path(data_file).read_text(encoding="utf-8")).get("projects", {})
+            except (json.JSONDecodeError, OSError, AttributeError):
+                projects = {}
+            for project_id, record in projects.items():
+                if not isinstance(record, dict):
+                    continue
+                project = record.get("project") if isinstance(record.get("project"), dict) else {}
+                tasks = record.get("tasks") if isinstance(record.get("tasks"), list) else []
+                created_at = record.get("createdAt") or utc_now()
+                updated_at = record.get("updatedAt") or created_at
+                owner = record.get("owner", "local")
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO projects (
+                      owner, id, name, location, created_at, updated_at,
+                      project_json, tasks_json, baselines_json, custom_templates_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        owner,
+                        str(project_id),
+                        str(project.get("projectName", "未命名项目"))[:240],
+                        str(project.get("location", ""))[:240],
+                        created_at,
+                        updated_at,
+                        _json_encode(project),
+                        _json_encode(tasks),
+                        _json_encode(record.get("baselines", [])),
+                        _json_encode(record.get("customTemplates", [])),
+                    ),
+                )
+
+        if Path(auth_file).exists():
+            try:
+                auth_data = json.loads(Path(auth_file).read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                auth_data = {}
+            for user_id, user in (auth_data.get("users") or {}).items():
+                if not isinstance(user, dict) or not user.get("email") or not user.get("passwordHash"):
+                    continue
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO users(id, email, name, password_hash, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user.get("id") or user_id,
+                        user.get("email"),
+                        user.get("name") or str(user.get("email")).split("@")[0],
+                        user.get("passwordHash"),
+                        user.get("createdAt") or utc_now(),
+                        user.get("updatedAt") or user.get("createdAt") or utc_now(),
+                    ),
+                )
+            for token, session in (auth_data.get("sessions") or {}).items():
+                if not isinstance(session, dict) or not session.get("userId"):
+                    continue
+                try:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO sessions(token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                        (token, session.get("userId"), session.get("createdAt") or utc_now(), float(session.get("expiresAt", 0))),
+                    )
+                except sqlite3.IntegrityError:
+                    continue
+
+        if Path(templates_file).exists():
+            try:
+                owners = json.loads(Path(templates_file).read_text(encoding="utf-8")).get("owners", {})
+            except (json.JSONDecodeError, OSError, AttributeError):
+                owners = {}
+            for owner, owner_data in owners.items():
+                if not isinstance(owner_data, dict):
+                    continue
+                templates = owner_data.get("templates")
+                if not isinstance(templates, list):
+                    continue
+                connection.execute(
+                    "INSERT OR IGNORE INTO user_templates(owner, templates_json, updated_at) VALUES (?, ?, ?)",
+                    (owner, _json_encode(templates), owner_data.get("updatedAt") or utc_now()),
+                )
+
+        if Path(ai_settings_file).exists() and not connection.execute("SELECT 1 FROM ai_settings WHERE id = 1").fetchone():
+            try:
+                settings = json.loads(Path(ai_settings_file).read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                settings = {}
+            if settings.get("provider") in SUPPORTED_AI_PROVIDERS and settings.get("model") and settings.get("apiKey"):
+                connection.execute(
+                    "INSERT INTO ai_settings(id, provider, model, api_key, updated_at) VALUES (1, ?, ?, ?, ?)",
+                    (settings["provider"], settings["model"], settings["apiKey"], settings.get("updatedAt") or utc_now()),
+                )
+        connection.commit()
+
+
 class CodexAgent:
     """Optional local Codex SDK bridge. Disabled by default and never exposed without admin authorization."""
 
@@ -547,6 +1052,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     ai_store = AiConfigStore(AI_SETTINGS_FILE)
     auth_store = AuthStore(AUTH_FILE)
     template_store = UserTemplateStore(TEMPLATES_FILE)
+    storage_label = DATA_FILE.name
     admin_token = os.environ.get("ADMIN_TOKEN", "")
     allow_local_admin = True
     allowed_origins = {value.strip() for value in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if value.strip()}
@@ -640,7 +1146,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
-            return self._send_json(200, {"ok": True, "storage": str(DATA_FILE.name), "publicReady": bool(self.admin_token), "auth": True, "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
+            return self._send_json(200, {"ok": True, "storage": self.storage_label, "publicReady": bool(self.admin_token), "auth": True, "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
         if path == "/api/auth/me":
             user = self._current_user()
             return self._send_json(200, {"authenticated": bool(user), "user": user, "owner": self._client_id()})
@@ -751,16 +1257,28 @@ class AppHandler(SimpleHTTPRequestHandler):
             return self._send_json(502, {"error": "无法连接模型服务"})
 
 
-def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, codex_agent=None):
+def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, database_file=None, use_sqlite=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, codex_agent=None):
     configured_admin_token = os.environ.get("ADMIN_TOKEN", "") if admin_token is None else admin_token
     configured_origins = AppHandler.allowed_origins if allowed_origins is None else set(allowed_origins)
     configured_rate_limit = ai_rate_limit if ai_rate_limit is not None else os.environ.get("AI_RATE_LIMIT_PER_MINUTE", "30")
     configured_codex_agent = codex_agent or CodexAgent()
+    legacy_file_mode = any(value is not None for value in (data_file, ai_settings_file, auth_file, templates_file))
+    use_database = (not legacy_file_mode) if use_sqlite is None else bool(use_sqlite)
+    database = SQLiteDatabase(Path(database_file) if database_file else DB_FILE) if use_database else None
+    if database:
+        migrate_json_files_to_sqlite(
+            database,
+            Path(data_file) if data_file else DATA_FILE,
+            Path(ai_settings_file) if ai_settings_file else AI_SETTINGS_FILE,
+            Path(auth_file) if auth_file else AUTH_FILE,
+            Path(templates_file) if templates_file else TEMPLATES_FILE,
+        )
     class ConfiguredHandler(AppHandler):
-        store = ProjectStore(Path(data_file) if data_file else DATA_FILE)
-        ai_store = AiConfigStore(Path(ai_settings_file) if ai_settings_file else AI_SETTINGS_FILE)
-        auth_store = AuthStore(Path(auth_file) if auth_file else AUTH_FILE)
-        template_store = UserTemplateStore(Path(templates_file) if templates_file else TEMPLATES_FILE)
+        store = DatabaseProjectStore(database) if database else ProjectStore(Path(data_file) if data_file else DATA_FILE)
+        ai_store = DatabaseAiConfigStore(database) if database else AiConfigStore(Path(ai_settings_file) if ai_settings_file else AI_SETTINGS_FILE)
+        auth_store = DatabaseAuthStore(database) if database else AuthStore(Path(auth_file) if auth_file else AUTH_FILE)
+        template_store = DatabaseUserTemplateStore(database) if database else UserTemplateStore(Path(templates_file) if templates_file else TEMPLATES_FILE)
+        storage_label = f"sqlite:{Path(database.path).name}" if database else str((Path(data_file) if data_file else DATA_FILE).name)
         admin_token = configured_admin_token
         allow_local_admin = host in {"127.0.0.1", "::1", "localhost"}
         allowed_origins = configured_origins

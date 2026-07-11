@@ -31,7 +31,7 @@
 - A4 横向打印及浏览器“另存为 PDF”版式
 - 项目与任务本地保存
 - 本机服务端项目库：多项目保存、打开、删除及刷新恢复
-- `/api/projects` 同源 CRUD API，数据原子写入 `data/projects.json`
+- `/api/projects` 同源 CRUD API，默认写入 SQLite 数据库 `data/app.db`
 - `/api/templates` 用户级自定义工序模板库，按登录账号或访客 ID 隔离保存到后端
 - Excel 五表工作簿导出（项目概览、WBS、资源负荷、风险审查、计划基准）
 - CSV 导出
@@ -58,14 +58,14 @@ python -m unittest tests.test_server -v
 
 测试覆盖 FS / SS / FF / SF、逆排总时差、循环依赖、施工日历、资源容量与自动错峰、六类项目模板生成、自定义空间模板展开、Excel 二进制写入后重新读取、项目 CRUD、登录注册与用户项目隔离，以及 AI 配置脱敏和未配置代理拒绝。
 
-生产文件输出到 `dist/`。本机服务脚本 `serve.py` 会优先发布 `dist/`，并提供项目持久化 API。
+生产文件输出到 `dist/`。本机服务脚本 `serve.py` 会优先发布 `dist/`，并提供项目、登录、模板和 AI 设置 API。默认数据库是 SQLite：`data/app.db`；如果历史目录中存在 `data/projects.json`、`data/auth.json`、`data/templates.json` 或 `data/ai-settings.json`，首次启动会尽量导入 SQLite。
 
 访问地址：<http://127.0.0.1:4173/>
 
 ## 公网部署
 
-完整部署步骤、环境变量、持久磁盘及 GitHub 发布流程见 [DEPLOYMENT.md](DEPLOYMENT.md)。GitHub Pages 只能发布静态前端；要保留项目库和 AI 代理，推荐从 GitHub 仓库构建 Docker 镜像并运行在支持持久磁盘的容器平台。
+完整部署步骤、环境变量、持久磁盘及 GitHub 发布流程见 [DEPLOYMENT.md](DEPLOYMENT.md)。GitHub Pages 只能发布静态前端；要保留登录、项目库、模板库和 AI 代理，必须同时运行后端。免费好落地的试用方案是：GitHub 保存代码，你的电脑运行 `python serve.py`，SQLite 存在本机 `data/app.db`，需要临时公网访问时再用 Cloudflare Tunnel 暴露本机端口。
 
 ## 安全提示
 
-AI API Key 保存在本机配置文件或部署平台 Secret 中；浏览器只读取脱敏后的末四位，并通过同源 `/api/ai/chat` 调用模型。项目、账号和用户级自定义工序模板分别保存在 `data/projects.json`、`data/auth.json` 和 `data/templates.json`。公网部署必须设置 `ADMIN_TOKEN`、HTTPS、持久磁盘和模型消费上限。当前已支持基础邮箱密码登录，但仍建议在正式保存机密工程数据前继续补充数据库迁移、审计日志、备份和企业级权限。
+AI API Key 保存在本机配置文件或部署平台 Secret 中；浏览器只读取脱敏后的末四位，并通过同源 `/api/ai/chat` 调用模型。项目、账号、会话、用户级自定义工序模板和 AI 设置默认保存在 `data/app.db`。公网部署必须设置 `ADMIN_TOKEN`、HTTPS、持久磁盘或稳定数据卷，以及模型消费上限。当前已支持基础邮箱密码登录，但仍建议在正式保存机密工程数据前继续补充审计日志、备份恢复、邮箱验证和企业级权限。

@@ -57,6 +57,16 @@ node node_modules/vite/bin/vite.js build .
 
 ## 本机运行与备份
 
+最简单方式：双击项目根目录下的 `ScheduleAI.exe`。它会自动打开一个服务窗口，并在浏览器访问 <http://127.0.0.1:4173/>。
+
+如果修改了启动器源码，可重新生成：
+
+```powershell
+.\scripts\build-launcher.ps1
+```
+
+也可以用 PowerShell 手动启动：
+
 ```powershell
 .\scripts\start-local.ps1 -Build
 ```

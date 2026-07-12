@@ -43,6 +43,8 @@ SESSION_COOKIE = "schedule_ai_session"
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", str(60 * 60 * 24 * 30)))
 PROJECT_LIMIT_PER_OWNER = int(os.environ.get("PROJECT_LIMIT_PER_OWNER", "20"))
 AI_DAILY_LIMIT_PER_OWNER = int(os.environ.get("AI_DAILY_LIMIT_PER_OWNER", "20"))
+ADMIN_DEFAULT_PASSWORD = os.environ.get("ADMIN_DEFAULT_PASSWORD", "177099")
+PHONE_CODE_DEV_MODE = os.environ.get("PHONE_CODE_DEV_MODE", "1") == "1"
 SUPPORTED_AI_PROVIDERS = {"deepseek", "gemini", "openai"}
 AI_PROVIDER_HOSTS = {"deepseek": "api.deepseek.com", "gemini": "generativelanguage.googleapis.com", "openai": "api.openai.com"}
 
@@ -53,6 +55,24 @@ def configured_admin_emails():
 
 def role_for_email(email, fallback="user"):
     return "admin" if str(email or "").strip().lower() in configured_admin_emails() else fallback
+
+
+def normalize_phone(phone):
+    value = re.sub(r"\D+", "", str(phone or ""))
+    if value.startswith("86") and len(value) == 13:
+        value = value[2:]
+    return value
+
+
+def validate_phone(phone):
+    value = normalize_phone(phone)
+    if not re.fullmatch(r"1\d{10}", value):
+        raise ValueError("请输入有效手机号")
+    return value
+
+
+def generate_phone_code():
+    return f"{secrets.randbelow(1000000):06d}"
 
 
 def utc_now():
@@ -140,9 +160,12 @@ class SQLiteDatabase:
                   name TEXT NOT NULL,
                   password_hash TEXT NOT NULL,
                   role TEXT NOT NULL DEFAULT 'user',
+                  phone TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique
+                  ON users(phone) WHERE phone <> '';
 
                 CREATE TABLE IF NOT EXISTS sessions (
                   token TEXT PRIMARY KEY,
@@ -187,6 +210,8 @@ class SQLiteDatabase:
                 columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
                 if "role" not in columns:
                     connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+                if "phone" not in columns:
+                    connection.execute("ALTER TABLE users ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
                 connection.commit()
             self.ready = True
 
@@ -405,6 +430,7 @@ class AuthStore:
             "email": user["email"],
             "name": user.get("name") or user["email"].split("@")[0],
             "role": role_for_email(user["email"], user.get("role", "user")),
+            "phone": user.get("phone", ""),
             "createdAt": user.get("createdAt", ""),
         }
 
@@ -460,6 +486,60 @@ class AuthStore:
                 if user.get("email") == email and self._verify_password(str(password or ""), user.get("passwordHash", "")):
                     return self._public_user(user)
         raise ValueError("邮箱或密码不正确")
+
+    def authenticate_phone(self, phone):
+        phone = validate_phone(phone)
+        with self.lock:
+            data = self._read()
+            for user in data["users"].values():
+                if user.get("phone") == phone:
+                    return self._public_user(user)
+        raise ValueError("该手机号尚未绑定账号")
+
+    def admin_login(self, email, password):
+        email = self._normalize_email(email)
+        if str(password or "") != ADMIN_DEFAULT_PASSWORD:
+            raise ValueError("管理员密码不正确")
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise ValueError("请输入管理员邮箱")
+        with self.lock:
+            data = self._read()
+            for user in data["users"].values():
+                if user.get("email") == email:
+                    user["role"] = "admin"
+                    user["updatedAt"] = utc_now()
+                    data["users"][user["id"]] = user
+                    self._write(data)
+                    return self._public_user(user)
+            user_id = f"u_{secrets.token_urlsafe(12)}"
+            user = {
+                "id": user_id,
+                "email": email,
+                "name": email.split("@")[0],
+                "passwordHash": self._hash_password(str(password)),
+                "role": "admin",
+                "phone": "",
+                "createdAt": utc_now(),
+                "updatedAt": utc_now(),
+            }
+            data["users"][user_id] = user
+            self._write(data)
+            return self._public_user(user)
+
+    def bind_phone(self, user_id, phone):
+        phone = validate_phone(phone)
+        with self.lock:
+            data = self._read()
+            user = data["users"].get(user_id)
+            if not user:
+                raise ValueError("用户不存在")
+            if any(item.get("phone") == phone and item.get("id") != user_id for item in data["users"].values()):
+                raise ValueError("该手机号已绑定其他账号")
+            user["phone"] = phone
+            user["updatedAt"] = utc_now()
+            data["users"][user_id] = user
+            self._write(data)
+            return self._public_user(user)
 
     def change_password(self, user_id, current_password, new_password):
         new_password = str(new_password or "")
@@ -804,6 +884,7 @@ class DatabaseAuthStore:
             "email": user["email"],
             "name": user.get("name") or user["email"].split("@")[0],
             "role": role,
+            "phone": user.get("phone", ""),
             "createdAt": user.get("createdAt") or user.get("created_at") or "",
         }
 
@@ -823,6 +904,7 @@ class DatabaseAuthStore:
             "name": name,
             "password_hash": AuthStore._hash_password(password),
             "role": role_for_email(email),
+            "phone": "",
             "created_at": now,
             "updated_at": now,
         }
@@ -830,8 +912,8 @@ class DatabaseAuthStore:
             if connection.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
                 raise ValueError("该邮箱已注册")
             connection.execute(
-                "INSERT INTO users(id, email, name, password_hash, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (user["id"], user["email"], user["name"], user["password_hash"], user["role"], user["created_at"], user["updated_at"]),
+                "INSERT INTO users(id, email, name, password_hash, role, phone, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (user["id"], user["email"], user["name"], user["password_hash"], user["role"], user["phone"], user["created_at"], user["updated_at"]),
             )
             connection.commit()
         return self._public_user(user)
@@ -843,6 +925,50 @@ class DatabaseAuthStore:
         if row and AuthStore._verify_password(str(password or ""), row["password_hash"]):
             return self._public_user(dict(row))
         raise ValueError("邮箱或密码不正确")
+
+    def authenticate_phone(self, phone):
+        phone = validate_phone(phone)
+        with self.database.lock, self.database.connect() as connection:
+            row = connection.execute("SELECT * FROM users WHERE phone = ?", (phone,)).fetchone()
+        if row:
+            return self._public_user(dict(row))
+        raise ValueError("该手机号尚未绑定账号")
+
+    def admin_login(self, email, password):
+        email = AuthStore._normalize_email(email)
+        if str(password or "") != ADMIN_DEFAULT_PASSWORD:
+            raise ValueError("管理员密码不正确")
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise ValueError("请输入管理员邮箱")
+        now = utc_now()
+        with self.database.lock, self.database.connect() as connection:
+            row = connection.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+            if row:
+                connection.execute("UPDATE users SET role = 'admin', updated_at = ? WHERE id = ?", (now, row["id"]))
+                connection.commit()
+                updated = connection.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
+                return self._public_user(dict(updated))
+            user_id = f"u_{secrets.token_urlsafe(12)}"
+            connection.execute(
+                "INSERT INTO users(id, email, name, password_hash, role, phone, created_at, updated_at) VALUES (?, ?, ?, ?, 'admin', '', ?, ?)",
+                (user_id, email, email.split("@")[0], AuthStore._hash_password(str(password)), now, now),
+            )
+            connection.commit()
+            created = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            return self._public_user(dict(created))
+
+    def bind_phone(self, user_id, phone):
+        phone = validate_phone(phone)
+        with self.database.lock, self.database.connect() as connection:
+            if not connection.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone():
+                raise ValueError("用户不存在")
+            row = connection.execute("SELECT id FROM users WHERE phone = ? AND id <> ?", (phone, user_id)).fetchone()
+            if row:
+                raise ValueError("该手机号已绑定其他账号")
+            connection.execute("UPDATE users SET phone = ?, updated_at = ? WHERE id = ?", (phone, utc_now(), user_id))
+            connection.commit()
+            updated = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return self._public_user(dict(updated))
 
     def change_password(self, user_id, current_password, new_password):
         new_password = str(new_password or "")
@@ -1017,8 +1143,8 @@ def migrate_json_files_to_sqlite(database, data_file=DATA_FILE, ai_settings_file
                     continue
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO users(id, email, name, password_hash, role, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO users(id, email, name, password_hash, role, phone, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         user.get("id") or user_id,
@@ -1026,6 +1152,7 @@ def migrate_json_files_to_sqlite(database, data_file=DATA_FILE, ai_settings_file
                         user.get("name") or str(user.get("email")).split("@")[0],
                         user.get("passwordHash"),
                         role_for_email(user.get("email"), user.get("role", "user")),
+                        normalize_phone(user.get("phone", "")) if user.get("phone") else "",
                         user.get("createdAt") or utc_now(),
                         user.get("updatedAt") or user.get("createdAt") or utc_now(),
                     ),
@@ -1223,6 +1350,8 @@ class AppHandler(SimpleHTTPRequestHandler):
     allowed_origins = {value.strip() for value in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if value.strip()}
     ai_limiter = RateLimiter(os.environ.get("AI_RATE_LIMIT_PER_MINUTE", "30"))
     login_limiter = FailedLoginLimiter(os.environ.get("LOGIN_FAILURE_LIMIT_PER_15_MINUTES", "6"))
+    phone_codes = {}
+    phone_code_lock = threading.RLock()
     codex_agent = CodexAgent()
 
     def __init__(self, *args, directory=None, **kwargs):
@@ -1329,6 +1458,29 @@ class AppHandler(SimpleHTTPRequestHandler):
                 (owner, config.get("provider", ""), config.get("model", ""), 1 if success else 0, status, str(error_type or "")[:80], duration_ms, utc_now()),
             )
             connection.commit()
+
+    def _issue_phone_code(self, phone):
+        phone = validate_phone(phone)
+        code = generate_phone_code()
+        with self.phone_code_lock:
+            self.phone_codes[phone] = {"code": code, "expiresAt": time.time() + 300}
+        result = {"phone": phone, "expiresInSeconds": 300}
+        if PHONE_CODE_DEV_MODE:
+            result["devCode"] = code
+        return result
+
+    def _verify_phone_code(self, phone, code):
+        phone = validate_phone(phone)
+        code = re.sub(r"\D+", "", str(code or ""))
+        with self.phone_code_lock:
+            record = self.phone_codes.get(phone)
+            if not record or record.get("expiresAt", 0) < time.time():
+                self.phone_codes.pop(phone, None)
+                raise ValueError("验证码已过期，请重新获取")
+            if not hmac.compare_digest(str(record.get("code", "")), code):
+                raise ValueError("验证码不正确")
+            self.phone_codes.pop(phone, None)
+        return phone
 
     def _ai_usage_overview(self):
         database = getattr(self.store, "database", None)
@@ -1646,9 +1798,44 @@ class AppHandler(SimpleHTTPRequestHandler):
                 except Exception:
                     pass
                 return self._send_json(401, {"error": str(error)})
+        if path == "/api/auth/admin-login":
+            try:
+                payload = self._read_json()
+                user = self.auth_store.admin_login(payload.get("email"), payload.get("password"))
+                token = self.auth_store.create_session(user["id"])
+                return self._send_json(200, {"authenticated": True, "user": user}, {"Set-Cookie": self._session_cookie(token)})
+            except (ValueError, json.JSONDecodeError) as error:
+                return self._send_json(401, {"error": str(error)})
+        if path == "/api/auth/phone-code":
+            try:
+                payload = self._read_json()
+                issued = self._issue_phone_code(payload.get("phone"))
+                return self._send_json(200, {"sent": True, **issued})
+            except (ValueError, json.JSONDecodeError) as error:
+                return self._send_json(400, {"error": str(error)})
+        if path == "/api/auth/phone-login":
+            try:
+                payload = self._read_json()
+                phone = self._verify_phone_code(payload.get("phone"), payload.get("code"))
+                user = self.auth_store.authenticate_phone(phone)
+                token = self.auth_store.create_session(user["id"])
+                return self._send_json(200, {"authenticated": True, "user": user}, {"Set-Cookie": self._session_cookie(token)})
+            except (ValueError, json.JSONDecodeError) as error:
+                return self._send_json(401, {"error": str(error)})
         if path == "/api/auth/logout":
             self.auth_store.logout(self._session_token())
             return self._send_json(200, {"authenticated": False, "user": None}, {"Set-Cookie": self._clear_session_cookie()})
+        if path == "/api/account/phone":
+            user = self._current_user()
+            if not user:
+                return self._send_json(401, {"error": "请先登录后绑定手机号"})
+            try:
+                payload = self._read_json()
+                phone = self._verify_phone_code(payload.get("phone"), payload.get("code"))
+                updated = self.auth_store.bind_phone(user["id"], phone)
+                return self._send_json(200, {"authenticated": True, "user": updated})
+            except (ValueError, json.JSONDecodeError) as error:
+                return self._send_json(400, {"error": str(error)})
         if path == "/api/account/password":
             user = self._current_user()
             if not user:
@@ -1728,6 +1915,8 @@ def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None,
         allowed_origins = configured_origins
         ai_limiter = RateLimiter(configured_rate_limit)
         login_limiter = FailedLoginLimiter(configured_login_failure_limit)
+        phone_codes = {}
+        phone_code_lock = threading.RLock()
         project_limit_per_owner = int(configured_project_limit)
         ai_daily_limit_per_owner = int(configured_ai_daily_limit)
         codex_agent = configured_codex_agent

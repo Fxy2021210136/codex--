@@ -123,6 +123,47 @@ class ProjectApiTest(unittest.TestCase):
         self.assertTrue(logged_in["authenticated"])
         self.assertIn("schedule_ai_session=", login_headers["Set-Cookie"])
 
+    def test_admin_default_login_and_phone_code_login(self):
+        self.server.RequestHandlerClass.allow_local_admin = False
+        status, admin, admin_headers = self.request_raw(
+            "/api/auth/admin-login",
+            "POST",
+            {"email": "admin@example.com", "password": "177099"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(admin["user"]["role"], "admin")
+        self.assertIn("schedule_ai_session=", admin_headers["Set-Cookie"])
+
+        _, registered, headers = self.request_raw(
+            "/api/auth/register",
+            "POST",
+            {"email": "phone@example.com", "password": "securepass1", "name": "手机用户"},
+        )
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertTrue(registered["authenticated"])
+
+        _, issued = self.request("/api/auth/phone-code", "POST", {"phone": "13800138000"})
+        self.assertEqual(issued["phone"], "13800138000")
+        self.assertRegex(issued["devCode"], r"^\d{6}$")
+
+        _, bound = self.request(
+            "/api/account/phone",
+            "POST",
+            {"phone": "13800138000", "code": issued["devCode"]},
+            {"Cookie": cookie},
+        )
+        self.assertEqual(bound["user"]["phone"], "13800138000")
+
+        _, second_code = self.request("/api/auth/phone-code", "POST", {"phone": "+86 13800138000"})
+        _, phone_login, phone_headers = self.request_raw(
+            "/api/auth/phone-login",
+            "POST",
+            {"phone": "13800138000", "code": second_code["devCode"]},
+        )
+        self.assertTrue(phone_login["authenticated"])
+        self.assertEqual(phone_login["user"]["email"], "phone@example.com")
+        self.assertIn("schedule_ai_session=", phone_headers["Set-Cookie"])
+
     def test_change_password_requires_current_password_and_rotates_login_secret(self):
         _, registered, headers = self.request_raw(
             "/api/auth/register",

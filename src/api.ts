@@ -42,6 +42,7 @@ export interface AuthUser {
   email: string
   name: string
   role?: 'user' | 'admin'
+  phone?: string
   createdAt: string
 }
 
@@ -73,6 +74,18 @@ export function loginAccount(payload:{email:string;password:string}){
   return request<AuthStatus>('/api/auth/login',{method:'POST',body:JSON.stringify(payload)})
 }
 
+export function adminLoginAccount(payload:{email:string;password:string}){
+  return request<AuthStatus>('/api/auth/admin-login',{method:'POST',body:JSON.stringify(payload)})
+}
+
+export function requestPhoneCode(payload:{phone:string}){
+  return request<{sent:boolean;phone:string;expiresInSeconds:number;devCode?:string}>('/api/auth/phone-code',{method:'POST',body:JSON.stringify(payload)})
+}
+
+export function loginWithPhoneCode(payload:{phone:string;code:string}){
+  return request<AuthStatus>('/api/auth/phone-login',{method:'POST',body:JSON.stringify(payload)})
+}
+
 export function logoutAccount(){
   return request<AuthStatus>('/api/auth/logout',{method:'POST'})
 }
@@ -96,6 +109,10 @@ export function deleteAccountData(){
 
 export function changeAccountPassword(payload:{currentPassword:string;newPassword:string}){
   return request<AuthStatus>('/api/account/password',{method:'POST',body:JSON.stringify(payload)})
+}
+
+export function bindAccountPhone(payload:{phone:string;code:string}){
+  return request<AuthStatus>('/api/account/phone',{method:'POST',body:JSON.stringify(payload)})
 }
 
 export async function listSavedProjects(){

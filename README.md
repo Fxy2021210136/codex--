@@ -74,6 +74,12 @@ node node_modules/vite/bin/vite.js build .
 .\scripts\restore-db.ps1 -BackupFile .\backups\app-YYYYMMDD-HHMMSS.db -Force
 ```
 
+公开给别人试用或部署前，先看 [PUBLIC_DEPLOYMENT_CHECKLIST.md](PUBLIC_DEPLOYMENT_CHECKLIST.md)。可用下面脚本生成 `ADMIN_TOKEN`：
+
+```powershell
+.\scripts\new-admin-token.ps1
+```
+
 ## 测试
 
 ```powershell

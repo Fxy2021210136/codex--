@@ -2,6 +2,8 @@
 
 基于 React + TypeScript + Vite 的通用工程计划应用。当前版本已经从房建单一模板升级为支持多工程类型和自定义模板的计划工作台。
 
+功能清单、访客模式、登录用户和管理员能力区别见 [FEATURES_AND_AUTH.md](FEATURES_AND_AUTH.md)。
+
 ## 已实现
 
 - 项目描述本地解析，以及 DeepSeek / Gemini AI 解析

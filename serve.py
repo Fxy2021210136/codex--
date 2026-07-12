@@ -164,8 +164,6 @@ class SQLiteDatabase:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique
-                  ON users(phone) WHERE phone <> '';
 
                 CREATE TABLE IF NOT EXISTS sessions (
                   token TEXT PRIMARY KEY,
@@ -212,6 +210,7 @@ class SQLiteDatabase:
                     connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
                 if "phone" not in columns:
                     connection.execute("ALTER TABLE users ADD COLUMN phone TEXT NOT NULL DEFAULT ''")
+                connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone) WHERE phone <> ''")
                 connection.commit()
             self.ready = True
 

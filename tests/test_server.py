@@ -164,6 +164,35 @@ class ProjectApiTest(unittest.TestCase):
         self.assertEqual(phone_login["user"]["email"], "phone@example.com")
         self.assertIn("schedule_ai_session=", phone_headers["Set-Cookie"])
 
+    def test_legacy_user_table_without_phone_column_migrates(self):
+        legacy_db = Path(self.temp.name) / "legacy-no-phone.db"
+        with sqlite3.connect(legacy_db) as db:
+            db.execute("""
+                CREATE TABLE users (
+                  id TEXT PRIMARY KEY,
+                  email TEXT NOT NULL UNIQUE,
+                  name TEXT NOT NULL,
+                  password_hash TEXT NOT NULL,
+                  role TEXT NOT NULL DEFAULT 'user',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )
+            """)
+            db.execute(
+                "INSERT INTO users(id, email, name, password_hash, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("u_legacy", "legacy@example.com", "Legacy", "hash", "user", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+            )
+            db.commit()
+        server = create_server(port=0, static_root=Path(self.temp.name), database_file=legacy_db, use_sqlite=True)
+        server.server_close()
+        with sqlite3.connect(legacy_db) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+            indexes = {row[1] for row in db.execute("PRAGMA index_list(users)").fetchall()}
+            phone = db.execute("SELECT phone FROM users WHERE id = 'u_legacy'").fetchone()[0]
+        self.assertIn("phone", columns)
+        self.assertIn("idx_users_phone_unique", indexes)
+        self.assertEqual(phone, "")
+
     def test_change_password_requires_current_password_and_rotates_login_secret(self):
         _, registered, headers = self.request_raw(
             "/api/auth/register",

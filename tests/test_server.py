@@ -103,7 +103,7 @@ class ProjectApiTest(unittest.TestCase):
             thread.join(timeout=2)
 
     @patch("serve.database_from_configuration")
-    def test_postgres_startup_failure_is_propagated_without_json_migration(self, factory):
+    def test_postgres_startup_failure_is_sanitized_without_json_migration(self, factory):
         credential_error = "cannot connect to postgresql://user:secret@host/db"
 
         class FailingPostgresDatabase:
@@ -114,9 +114,13 @@ class ProjectApiTest(unittest.TestCase):
 
         factory.return_value = FailingPostgresDatabase()
         with patch("serve.migrate_json_files_to_sqlite") as migration:
-            with self.assertRaisesRegex(RuntimeError, credential_error) as raised:
+            with self.assertRaises(RuntimeError) as raised:
                 create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
-        self.assertEqual(str(raised.exception), credential_error)
+        message = str(raised.exception)
+        self.assertEqual(message, "数据库初始化失败，请检查服务端配置。")
+        self.assertNotIn("postgresql://user:secret@host/db", message)
+        self.assertNotIn("user", message)
+        self.assertNotIn("secret", message)
         migration.assert_not_called()
 
     @patch("serve.database_from_configuration")

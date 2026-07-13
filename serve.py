@@ -2069,7 +2069,10 @@ def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None,
     use_database = (not legacy_file_mode) if use_sqlite is None else bool(use_sqlite)
     database = database_from_configuration(database_url, database_file) if use_database else None
     if database:
-        database.ensure_schema()
+        try:
+            database.ensure_schema()
+        except Exception:
+            raise RuntimeError("数据库初始化失败，请检查服务端配置。") from None
         if database.engine == "sqlite":
             migrate_json_files_to_sqlite(
                 database,

@@ -44,11 +44,63 @@ class ProjectApiTest(unittest.TestCase):
     def test_server_keeps_json_migration_on_sqlite_during_adapter_stage(self):
         with patch.dict("os.environ", {"DATABASE_URL": "postgresql://user:secret@db.example/app"}):
             with patch("serve.migrate_json_files_to_sqlite") as mocked_migration:
-                server = create_server(port=0, static_root=Path(self.temp.name), database_file=self.db_file, use_sqlite=True)
+                server = create_server(port=0, static_root=Path(self.temp.name), database_file=self.db_file, database_url="", use_sqlite=True)
         try:
             self.assertIsInstance(mocked_migration.call_args.args[0], SQLiteDatabase)
         finally:
             server.server_close()
+
+    @patch("serve.database_from_configuration")
+    def test_create_server_uses_explicit_database_url(self, factory):
+        database = SQLiteDatabase(self.db_file)
+        factory.return_value = database
+        server = create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        try:
+            factory.assert_called_once_with("postgresql://redacted", None)
+            self.assertIs(server.RequestHandlerClass.store.database, database)
+        finally:
+            server.server_close()
+
+    @patch("serve.database_from_configuration")
+    def test_postgres_database_health_readiness_and_admin_overview_do_not_probe_a_file(self, factory):
+        backing = SQLiteDatabase(Path(self.temp.name) / "postgres-fake.db")
+
+        class FakePostgresDatabase:
+            engine = "postgresql"
+            label = "postgresql"
+            path = None
+            lock = backing.lock
+
+            def ensure_schema(self):
+                backing.ensure_schema()
+
+            def connect(self):
+                return backing.connect()
+
+        factory.return_value = FakePostgresDatabase()
+        with patch("serve.migrate_json_files_to_sqlite") as migration:
+            server = create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        migration.assert_not_called()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urlopen(f"{base}/api/health") as response:
+                health = json.loads(response.read().decode("utf-8"))
+            with urlopen(f"{base}/api/admin/overview") as response:
+                overview = json.loads(response.read().decode("utf-8"))
+            with urlopen(f"{base}/api/readiness") as response:
+                readiness = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(health["database"], {"engine": "postgresql", "connected": True})
+            self.assertEqual(overview["storage"], {"engine": "postgresql", "label": "postgresql", "path": "", "exists": True, "sizeBytes": 0, "updatedAt": ""})
+            checks = {item["key"]: item for item in readiness["checks"]}
+            self.assertEqual(checks["storageWritable"]["level"], "ok")
+            self.assertEqual(checks["database"]["level"], "ok")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_model_json_repair(self):
         repaired = parse_model_json('```json\n{"summary":"ok","items":[1,2,],}\n```')
@@ -463,6 +515,7 @@ class ProjectApiTest(unittest.TestCase):
         self.assertFalse(health["publicReady"])
         self.assertFalse(health["phoneAuth"]["enabled"])
         self.assertTrue(health["emailAuth"]["enabled"])
+        self.assertEqual(health["database"], {"engine": "sqlite", "connected": True})
 
         with self.assertRaises(HTTPError) as forbidden:
             self.request("/api/readiness")

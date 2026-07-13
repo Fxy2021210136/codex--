@@ -1680,18 +1680,22 @@ class AppHandler(SimpleHTTPRequestHandler):
                 recent_user_rows = connection.execute("SELECT id, email, name, role, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT 5").fetchall()
                 recent_template_rows = connection.execute("SELECT owner, templates_json, updated_at FROM user_templates ORDER BY updated_at DESC LIMIT 5").fetchall()
             template_items = sum(len(_json_decode(row["templates_json"], [])) for row in template_rows)
-            storage_path = Path(database.path)
-            storage_exists = storage_path.exists()
-            return {
-                "generatedAt": utc_now(),
-                "storage": {
+            if database.engine == "sqlite":
+                storage_path = Path(database.path)
+                storage_exists = storage_path.exists()
+                storage = {
                     "engine": "sqlite",
                     "label": self.storage_label,
                     "path": str(storage_path),
                     "exists": storage_exists,
                     "sizeBytes": storage_path.stat().st_size if storage_exists else 0,
                     "updatedAt": datetime.fromtimestamp(storage_path.stat().st_mtime, timezone.utc).isoformat() if storage_exists else "",
-                },
+                }
+            else:
+                storage = {"engine": "postgresql", "label": "postgresql", "path": "", "exists": True, "sizeBytes": 0, "updatedAt": ""}
+            return {
+                "generatedAt": utc_now(),
+                "storage": storage,
                 "counts": {
                     "users": users,
                     "projects": projects,
@@ -1759,25 +1763,28 @@ class AppHandler(SimpleHTTPRequestHandler):
             checks.append({"key": key, "label": label, "level": level, "detail": detail, "required": required})
 
         database = getattr(self.store, "database", None)
-        storage_path = Path(database.path) if database else Path(getattr(self.store, "path", DATA_FILE))
-        storage_parent = storage_path.parent
-        try:
-            storage_parent.mkdir(parents=True, exist_ok=True)
-            probe = storage_parent / f".readiness-{secrets.token_hex(4)}.tmp"
-            probe.write_text("ok", encoding="utf-8")
-            probe.unlink(missing_ok=True)
-            add("storageWritable", "数据目录可写", "ok", f"{storage_parent} 可写，项目和账号数据可持久保存。", True)
-        except OSError as error:
-            add("storageWritable", "数据目录可写", "error", f"{storage_parent} 不可写：{error}", True)
+        if database and database.engine == "postgresql":
+            add("storageWritable", "持久数据库", "ok", "PostgreSQL 负责持久化，不依赖 Render 临时文件系统。", True)
+        else:
+            storage_path = Path(database.path) if database else Path(getattr(self.store, "path", DATA_FILE))
+            storage_parent = storage_path.parent
+            try:
+                storage_parent.mkdir(parents=True, exist_ok=True)
+                probe = storage_parent / f".readiness-{secrets.token_hex(4)}.tmp"
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink(missing_ok=True)
+                add("storageWritable", "数据目录可写", "ok", f"{storage_parent} 可写，项目和账号数据可持久保存。", True)
+            except OSError as error:
+                add("storageWritable", "数据目录可写", "error", f"{storage_parent} 不可写：{error}", True)
 
         try:
             if database:
                 with database.lock, database.connect() as connection:
                     connection.execute("SELECT COUNT(*) FROM projects").fetchone()
-                add("database", "数据库连接", "ok", "SQLite 数据库可连接，核心表结构已初始化。", True)
+                add("database", "数据库连接", "ok", f"{database.label} 可连接，核心表结构已初始化。", True)
             else:
                 add("database", "数据库连接", "warning", "当前使用 JSON 文件存储；多人长期使用建议切换 SQLite。", False)
-        except (OSError, sqlite3.Error) as error:
+        except Exception as error:
             add("database", "数据库连接", "error", f"数据库不可用：{error}", True)
 
         if self.admin_token:
@@ -1831,7 +1838,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
-            return self._send_json(200, {"ok": True, "storage": self.storage_label, "publicReady": self._public_ready(), "auth": True, "phoneAuth": self._phone_auth_public(), "emailAuth": self._email_auth_public(), "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
+            return self._send_json(200, {"ok": True, "storage": self.storage_label, "database": {"engine": getattr(getattr(self.store, "database", None), "engine", "json"), "connected": True}, "publicReady": self._public_ready(), "auth": True, "phoneAuth": self._phone_auth_public(), "emailAuth": self._email_auth_public(), "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
         if path == "/api/auth/me":
             user = self._current_user()
             owner = self._client_id()
@@ -2050,7 +2057,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             return self._send_json(502, {"error": "无法连接模型服务"})
 
 
-def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, database_file=None, use_sqlite=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, project_limit_per_owner=None, ai_daily_limit_per_owner=None, login_failure_limit=None, codex_agent=None):
+def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, database_file=None, database_url=None, use_sqlite=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, project_limit_per_owner=None, ai_daily_limit_per_owner=None, login_failure_limit=None, codex_agent=None):
     configured_admin_token = os.environ.get("ADMIN_TOKEN", "") if admin_token is None else admin_token
     configured_origins = AppHandler.allowed_origins if allowed_origins is None else set(allowed_origins)
     configured_rate_limit = ai_rate_limit if ai_rate_limit is not None else os.environ.get("AI_RATE_LIMIT_PER_MINUTE", "30")
@@ -2060,15 +2067,17 @@ def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None,
     configured_codex_agent = codex_agent or CodexAgent()
     legacy_file_mode = any(value is not None for value in (data_file, ai_settings_file, auth_file, templates_file))
     use_database = (not legacy_file_mode) if use_sqlite is None else bool(use_sqlite)
-    database = database_from_configuration("", database_file) if use_database else None
+    database = database_from_configuration(database_url, database_file) if use_database else None
     if database:
-        migrate_json_files_to_sqlite(
-            database,
-            Path(data_file) if data_file else DATA_FILE,
-            Path(ai_settings_file) if ai_settings_file else AI_SETTINGS_FILE,
-            Path(auth_file) if auth_file else AUTH_FILE,
-            Path(templates_file) if templates_file else TEMPLATES_FILE,
-        )
+        database.ensure_schema()
+        if database.engine == "sqlite":
+            migrate_json_files_to_sqlite(
+                database,
+                Path(data_file) if data_file else DATA_FILE,
+                Path(ai_settings_file) if ai_settings_file else AI_SETTINGS_FILE,
+                Path(auth_file) if auth_file else AUTH_FILE,
+                Path(templates_file) if templates_file else TEMPLATES_FILE,
+            )
     class ConfiguredHandler(AppHandler):
         store = DatabaseProjectStore(database) if database else ProjectStore(Path(data_file) if data_file else DATA_FILE)
         ai_store = DatabaseAiConfigStore(database) if database else AiConfigStore(Path(ai_settings_file) if ai_settings_file else AI_SETTINGS_FILE)

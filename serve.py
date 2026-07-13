@@ -1427,6 +1427,9 @@ class AppHandler(SimpleHTTPRequestHandler):
     def _public_ready(self):
         return bool(self.admin_token) and not ADMIN_DEFAULT_PASSWORD_IS_LOCAL and not PHONE_CODE_DEV_MODE
 
+    def _phone_auth_public(self):
+        return {"enabled": bool(PHONE_CODE_DEV_MODE and self.allow_local_admin), "devMode": PHONE_CODE_DEV_MODE}
+
     def _project_quota(self, owner):
         count = self.store.count(owner) if hasattr(self.store, "count") else len(self.store.list(owner))
         exempt = owner == "local" or self._is_admin()
@@ -1689,7 +1692,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
-            return self._send_json(200, {"ok": True, "storage": self.storage_label, "publicReady": self._public_ready(), "auth": True, "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
+            return self._send_json(200, {"ok": True, "storage": self.storage_label, "publicReady": self._public_ready(), "auth": True, "phoneAuth": self._phone_auth_public(), "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
         if path == "/api/auth/me":
             user = self._current_user()
             owner = self._client_id()
@@ -1709,7 +1712,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "templateUpdatedAt": templates.get("updatedAt", ""),
             })
         if path == "/api/integrations":
-            return self._send_json(200, {"ai": self.ai_store.public(), "codex": self.codex_agent.public()})
+            return self._send_json(200, {"ai": self.ai_store.public(), "phoneAuth": self._phone_auth_public(), "codex": self.codex_agent.public()})
         if path == "/api/diagnostics/connectivity":
             if not self._is_admin():
                 return self._send_json(403, {"error": "仅管理员可以运行网络诊断"})

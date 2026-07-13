@@ -1,11 +1,11 @@
 import { type FormEvent, useEffect, useState } from 'react'
-import { adminLoginAccount, bindAccountPhone, changeAccountPassword, deleteAccountData, exportAccountData, loginAccount, loginWithPhoneCode, logoutAccount, registerAccount, requestPhoneCode } from '../api'
+import { adminLoginAccount, bindAccountPhone, changeAccountPassword, deleteAccountData, exportAccountData, loadIntegrationStatus, loginAccount, loginWithPhoneCode, logoutAccount, registerAccount, requestPhoneCode } from '../api'
 import type { AuthStatus } from '../api'
 
 type AuthMode='login'|'register'|'admin'|'phone'
 
 export function AuthDialog({open,auth,onClose,onChange}:{open:boolean;auth:AuthStatus;onClose:()=>void;onChange:(next:AuthStatus)=>void}){
-  const phoneAuthEnabled=import.meta.env.VITE_PUBLIC_DEPLOYMENT!=='true'
+  const [phoneAuthEnabled,setPhoneAuthEnabled]=useState(import.meta.env.VITE_PUBLIC_DEPLOYMENT!=='true')
   const [mode,setMode]=useState<AuthMode>('login')
   const [email,setEmail]=useState(''),[password,setPassword]=useState(''),[name,setName]=useState('')
   const [busy,setBusy]=useState(false),[message,setMessage]=useState('')
@@ -13,6 +13,7 @@ export function AuthDialog({open,auth,onClose,onChange}:{open:boolean;auth:AuthS
   const [phone,setPhone]=useState(''),[phoneCode,setPhoneCode]=useState(''),[phoneHint,setPhoneHint]=useState('')
 
   useEffect(()=>{if(open){setMessage('');setPassword('');if(!auth.authenticated)setMode('login')}},[open,auth.authenticated])
+  useEffect(()=>{if(open)loadIntegrationStatus().then(status=>setPhoneAuthEnabled(status.phoneAuth.enabled)).catch(()=>{})},[open])
   if(!open)return null
 
   const submit=async(event:FormEvent)=>{

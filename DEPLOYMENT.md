@@ -77,6 +77,12 @@ docker compose up --build
 
 访问 <http://127.0.0.1:4173>，健康检查为 `/api/health`。公网部署只有在 `ADMIN_TOKEN`、`ADMIN_DEFAULT_PASSWORD` 和 `PHONE_CODE_DEV_MODE=0` 等必需项满足后，`publicReady` 才会为 `true`。
 
+也可以用脚本快速检查：
+
+```powershell
+.\scripts\check-public-ready.ps1 -BaseUrl http://127.0.0.1:4173
+```
+
 ## 发布到个人 GitHub 仓库
 
 ```bash

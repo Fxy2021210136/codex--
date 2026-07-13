@@ -299,6 +299,7 @@ class ProjectApiTest(unittest.TestCase):
             runner=lambda **kwargs: calls.append(kwargs) or {"finalResponse": "审查完成", "sandbox": kwargs["sandbox"]},
         )
         _, integrations = self.request("/api/integrations")
+        self.assertTrue(integrations["phoneAuth"]["enabled"])
         self.assertTrue(integrations["codex"]["ready"])
         self.assertEqual(integrations["codex"]["sandbox"], "read_only")
         _, result = self.request("/api/codex/run", "POST", {"prompt": "只读审查当前计划"})
@@ -309,6 +310,8 @@ class ProjectApiTest(unittest.TestCase):
         self.assertEqual(write_rejected.exception.code, 400)
         self.server.RequestHandlerClass.allow_local_admin = False
         self.server.RequestHandlerClass.admin_token = "admin-secret"
+        _, public_integrations = self.request("/api/integrations")
+        self.assertFalse(public_integrations["phoneAuth"]["enabled"])
         with self.assertRaises(HTTPError) as forbidden:
             self.request("/api/codex/run", "POST", {"prompt": "审查"})
         self.assertEqual(forbidden.exception.code, 403)
@@ -418,6 +421,7 @@ class ProjectApiTest(unittest.TestCase):
         self.server.RequestHandlerClass.admin_token = "admin-secret"
         _, health = self.request("/api/health")
         self.assertFalse(health["publicReady"])
+        self.assertFalse(health["phoneAuth"]["enabled"])
 
         with self.assertRaises(HTTPError) as forbidden:
             self.request("/api/readiness")

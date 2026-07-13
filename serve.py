@@ -46,6 +46,7 @@ AI_DAILY_LIMIT_PER_OWNER = int(os.environ.get("AI_DAILY_LIMIT_PER_OWNER", "20"))
 ADMIN_DEFAULT_PASSWORD = os.environ.get("ADMIN_DEFAULT_PASSWORD", "177099")
 ADMIN_DEFAULT_PASSWORD_IS_LOCAL = "ADMIN_DEFAULT_PASSWORD" not in os.environ and ADMIN_DEFAULT_PASSWORD == "177099"
 PHONE_CODE_DEV_MODE = os.environ.get("PHONE_CODE_DEV_MODE", "1") == "1"
+EMAIL_VERIFICATION_MODE = os.environ.get("EMAIL_VERIFICATION_MODE", "off").strip().lower()
 SUPPORTED_AI_PROVIDERS = {"deepseek", "gemini", "openai"}
 AI_PROVIDER_HOSTS = {"deepseek": "api.deepseek.com", "gemini": "generativelanguage.googleapis.com", "openai": "api.openai.com"}
 
@@ -1430,6 +1431,15 @@ class AppHandler(SimpleHTTPRequestHandler):
     def _phone_auth_public(self):
         return {"enabled": bool(PHONE_CODE_DEV_MODE and self.allow_local_admin), "devMode": PHONE_CODE_DEV_MODE}
 
+    def _email_auth_public(self):
+        configured = bool(os.environ.get("EMAIL_SMTP_HOST", "").strip() and os.environ.get("EMAIL_FROM", "").strip())
+        return {
+            "enabled": True,
+            "verificationEnabled": EMAIL_VERIFICATION_MODE == "smtp" and configured,
+            "verificationMode": EMAIL_VERIFICATION_MODE,
+            "configured": configured,
+        }
+
     def _project_quota(self, owner):
         count = self.store.count(owner) if hasattr(self.store, "count") else len(self.store.list(owner))
         exempt = owner == "local" or self._is_admin()
@@ -1664,6 +1674,14 @@ class AppHandler(SimpleHTTPRequestHandler):
         else:
             add("phoneCode", "手机验证码", "ok", "PHONE_CODE_DEV_MODE 已关闭。", True)
 
+        email_auth = self._email_auth_public()
+        if EMAIL_VERIFICATION_MODE == "off":
+            add("emailVerification", "邮箱验证", "warning", "邮箱验证未启用；邮箱密码登录仍可免费使用。")
+        elif EMAIL_VERIFICATION_MODE == "smtp" and email_auth["configured"]:
+            add("emailVerification", "邮箱验证", "ok", "SMTP 邮箱验证已配置。")
+        else:
+            add("emailVerification", "邮箱验证", "error", "EMAIL_VERIFICATION_MODE 已启用，但 EMAIL_SMTP_HOST 或 EMAIL_FROM 未配置。", True)
+
         if os.environ.get("APP_SECURE_COOKIES", "").strip() in {"1", "true", "TRUE", "yes"}:
             add("secureCookies", "安全 Cookie", "ok", "APP_SECURE_COOKIES 已启用，适合 HTTPS 部署。")
         else:
@@ -1692,7 +1710,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
-            return self._send_json(200, {"ok": True, "storage": self.storage_label, "publicReady": self._public_ready(), "auth": True, "phoneAuth": self._phone_auth_public(), "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
+            return self._send_json(200, {"ok": True, "storage": self.storage_label, "publicReady": self._public_ready(), "auth": True, "phoneAuth": self._phone_auth_public(), "emailAuth": self._email_auth_public(), "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
         if path == "/api/auth/me":
             user = self._current_user()
             owner = self._client_id()
@@ -1712,7 +1730,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "templateUpdatedAt": templates.get("updatedAt", ""),
             })
         if path == "/api/integrations":
-            return self._send_json(200, {"ai": self.ai_store.public(), "phoneAuth": self._phone_auth_public(), "codex": self.codex_agent.public()})
+            return self._send_json(200, {"ai": self.ai_store.public(), "phoneAuth": self._phone_auth_public(), "emailAuth": self._email_auth_public(), "codex": self.codex_agent.public()})
         if path == "/api/diagnostics/connectivity":
             if not self._is_admin():
                 return self._send_json(403, {"error": "仅管理员可以运行网络诊断"})

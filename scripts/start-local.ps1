@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot\enable-utf8.ps1"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
 

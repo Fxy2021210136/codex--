@@ -73,6 +73,12 @@ node node_modules/vite/bin/vite.js build .
 .\scripts\start-local.ps1 -Build
 ```
 
+如果 PowerShell 里中文显示成乱码，先运行：
+
+```powershell
+.\scripts\enable-utf8.ps1
+```
+
 默认访问 <http://127.0.0.1:4173/>，数据保存到 `data/app.db`。需要临时给别人访问时，保持本机服务运行，再开一个 PowerShell：
 
 ```powershell

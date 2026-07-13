@@ -300,6 +300,8 @@ class ProjectApiTest(unittest.TestCase):
         )
         _, integrations = self.request("/api/integrations")
         self.assertTrue(integrations["phoneAuth"]["enabled"])
+        self.assertTrue(integrations["emailAuth"]["enabled"])
+        self.assertEqual(integrations["emailAuth"]["verificationMode"], "off")
         self.assertTrue(integrations["codex"]["ready"])
         self.assertEqual(integrations["codex"]["sandbox"], "read_only")
         _, result = self.request("/api/codex/run", "POST", {"prompt": "只读审查当前计划"})
@@ -422,6 +424,7 @@ class ProjectApiTest(unittest.TestCase):
         _, health = self.request("/api/health")
         self.assertFalse(health["publicReady"])
         self.assertFalse(health["phoneAuth"]["enabled"])
+        self.assertTrue(health["emailAuth"]["enabled"])
 
         with self.assertRaises(HTTPError) as forbidden:
             self.request("/api/readiness")
@@ -435,6 +438,7 @@ class ProjectApiTest(unittest.TestCase):
         self.assertEqual(checks["adminToken"]["level"], "ok")
         self.assertEqual(checks["adminPassword"]["level"], "error")
         self.assertEqual(checks["phoneCode"]["level"], "error")
+        self.assertEqual(checks["emailVerification"]["level"], "warning")
         self.assertIn("warningCount", readiness)
 
     @patch("serve.call_ai_provider")

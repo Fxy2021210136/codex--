@@ -162,6 +162,7 @@ export function clearServerAiConfig(){
 export interface IntegrationStatus {
   ai: {configured:boolean;provider:AiSettings['provider'];model:string;maskedKey:string}
   phoneAuth: {enabled:boolean;devMode:boolean}
+  emailAuth: {enabled:boolean;verificationEnabled:boolean;verificationMode:string;configured:boolean}
   codex: {enabled:boolean;available:boolean;ready:boolean;model:string;sandbox:'read_only'|'workspace_write';adminOnly:boolean;runtime:'python-sdk'|'cli'|'test-runner'|'unavailable'}
 }
 

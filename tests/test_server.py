@@ -20,6 +20,7 @@ from serve import (
     create_server,
     database_from_configuration,
     parse_model_json,
+    _postgres_row_factory,
 )
 
 
@@ -43,6 +44,10 @@ class ProjectApiTest(unittest.TestCase):
         total, success = row
         self.assertEqual((total, success), (4, 3))
         self.assertEqual(dict(row), {"count": 4, "success": 3})
+
+    def test_postgres_row_factory_accepts_commands_without_result_columns(self):
+        row = _postgres_row_factory(SimpleNamespace(description=None))([])
+        self.assertEqual(dict(row), {})
 
     def test_server_keeps_json_migration_on_sqlite_during_adapter_stage(self):
         with patch.dict("os.environ", {"DATABASE_URL": "postgresql://user:secret@db.example/app"}):

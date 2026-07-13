@@ -234,7 +234,7 @@ class HybridRow:
 
 
 def _postgres_row_factory(cursor):
-    names = tuple(column.name for column in cursor.description)
+    names = tuple(column.name for column in (cursor.description or ()))
     return lambda values: HybridRow(names, values)
 
 

@@ -1424,6 +1424,9 @@ class AppHandler(SimpleHTTPRequestHandler):
     def _phone_code_dev_mode_blocked(self):
         return PHONE_CODE_DEV_MODE and not self.allow_local_admin
 
+    def _public_ready(self):
+        return bool(self.admin_token) and not ADMIN_DEFAULT_PASSWORD_IS_LOCAL and not PHONE_CODE_DEV_MODE
+
     def _project_quota(self, owner):
         count = self.store.count(owner) if hasattr(self.store, "count") else len(self.store.list(owner))
         exempt = owner == "local" or self._is_admin()
@@ -1686,7 +1689,7 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
-            return self._send_json(200, {"ok": True, "storage": self.storage_label, "publicReady": bool(self.admin_token), "auth": True, "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
+            return self._send_json(200, {"ok": True, "storage": self.storage_label, "publicReady": self._public_ready(), "auth": True, "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
         if path == "/api/auth/me":
             user = self._current_user()
             owner = self._client_id()

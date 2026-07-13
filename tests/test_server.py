@@ -416,6 +416,9 @@ class ProjectApiTest(unittest.TestCase):
     def test_readiness_check_requires_admin_and_reports_core_status(self):
         self.server.RequestHandlerClass.allow_local_admin = False
         self.server.RequestHandlerClass.admin_token = "admin-secret"
+        _, health = self.request("/api/health")
+        self.assertFalse(health["publicReady"])
+
         with self.assertRaises(HTTPError) as forbidden:
             self.request("/api/readiness")
         self.assertEqual(forbidden.exception.code, 403)

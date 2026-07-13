@@ -5,11 +5,13 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from serve import (
+    AppHandler,
     CodexAgent,
     HybridRow,
     PostgresDatabase,
@@ -177,16 +179,10 @@ class ProjectApiTest(unittest.TestCase):
             path = None
             lock = backing.lock
 
-            def __init__(self):
-                self.connect_calls = 0
-
             def ensure_schema(self):
                 backing.ensure_schema()
 
             def connect(self):
-                self.connect_calls += 1
-                if self.connect_calls == 1:
-                    return backing.connect()
                 raise sqlite3.OperationalError(f"cannot connect to {credential_url}")
 
         factory.return_value = FailingPostgresDatabase()
@@ -208,6 +204,16 @@ class ProjectApiTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_health_does_not_misreport_non_database_failure(self):
+        handler = object.__new__(AppHandler)
+        handler.path = "/api/health"
+        handler.store = SimpleNamespace(database=None)
+        handler.storage_label = "test"
+        handler._public_ready = lambda: (_ for _ in ()).throw(RuntimeError("non-database failure"))
+        handler._send_json = lambda *args: args
+        with self.assertRaisesRegex(RuntimeError, "non-database failure"):
+            handler.do_GET()
 
     @patch("serve.database_from_configuration")
     def test_database_runtime_error_has_stable_redacted_http_response(self, factory):

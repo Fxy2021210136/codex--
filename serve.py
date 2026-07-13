@@ -1847,9 +1847,11 @@ class AppHandler(SimpleHTTPRequestHandler):
                 if database:
                     with database.lock, database.connect() as connection:
                         connection.execute("SELECT 1").fetchone()
-                return self._send_json(200, {"ok": True, "storage": self.storage_label, "database": {"engine": getattr(database, "engine", "json"), "connected": True}, "publicReady": self._public_ready(), "auth": True, "phoneAuth": self._phone_auth_public(), "emailAuth": self._email_auth_public(), "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
-            except Exception:
+            except Exception as error:
+                if not _is_database_error(error):
+                    raise
                 return self._send_json(503, {"ok": False, "storage": self.storage_label, "database": {"engine": getattr(database, "engine", "json"), "connected": False}, "error": "数据库暂时不可用，请稍后重试。"})
+            return self._send_json(200, {"ok": True, "storage": self.storage_label, "database": {"engine": getattr(database, "engine", "json"), "connected": True}, "publicReady": self._public_ready(), "auth": True, "phoneAuth": self._phone_auth_public(), "emailAuth": self._email_auth_public(), "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
         if path == "/api/auth/me":
             user = self._current_user()
             owner = self._client_id()

@@ -19,6 +19,8 @@ ENV APP_HOST=0.0.0.0 \
     PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY --from=frontend /app/dist ./dist
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 COPY serve.py ./serve.py
 RUN addgroup -S app && adduser -S app -G app && mkdir -p /data && chown -R app:app /app /data
 USER app
@@ -26,4 +28,3 @@ VOLUME ["/data"]
 EXPOSE 4173
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -qO- "http://127.0.0.1:${PORT}/api/health" || exit 1
 CMD ["python", "serve.py"]
-

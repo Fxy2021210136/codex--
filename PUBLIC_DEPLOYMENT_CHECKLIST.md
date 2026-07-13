@@ -1,6 +1,8 @@
 # 公开使用上线清单
 
-这份清单适合当前最省钱、最好落地的路线：源码放 GitHub，应用运行在你的电脑或支持持久磁盘的容器平台，数据先用 SQLite。
+这份清单提供两条免费路线：长期公开访问用 Render + Neon；无需云账号的临时演示继续用本机 SQLite + Tunnel。
+
+> 代码完成并推送到 GitHub 前无需操作 Neon 或 Render。
 
 ## 方案 A：零成本内测，本机 + SQLite + Tunnel
 
@@ -44,26 +46,36 @@
 
 注意：你的电脑关机、断网或程序停止后，别人就不能访问；Tunnel 临时地址也可能变化。
 
-## 方案 B：长期公开访问，容器 + 持久磁盘
+## 方案 B：长期公开访问，Render Free + Neon Free
 
 适合：希望别人长期打开一个固定网址使用。
 
-部署平台需要满足三件事：
+1. 在 Neon 点击 **Sign up with GitHub**，登录后点击 **New project**，创建 Free 项目。
+2. 打开项目的 **Connect** 页面，复制 PostgreSQL 连接字符串，并确认包含 `sslmode=require`。
+3. 在 Render 用 GitHub 登录，点击 **New > Blueprint**，授权并选择 `Fxy2021210136/codex--`。
+4. Render 读取 `render.yaml` 后，填写：
 
-- 能运行 Docker 镜像或 Python 服务；
-- 能挂载持久磁盘到 `/data`；
-- 能设置环境变量和 HTTPS 域名。
+   ```env
+   DATABASE_URL=粘贴 Neon 连接字符串
+   ADMIN_EMAILS=你的邮箱@example.com
+   ADMIN_DEFAULT_PASSWORD=新的高强度管理员密码
+   ```
 
-环境变量可参考 `.env.production.example`。最关键的是：
+5. 确认 Blueprint 中 `PHONE_CODE_DEV_MODE=0`、`APP_SECURE_COOKIES=1`、`EMAIL_VERIFICATION_MODE=off`；`ADMIN_TOKEN` 会自动生成。
+6. 点击 **Apply** 部署。不要创建 Render 磁盘，也不要把连接字符串或密码写入仓库。
+7. 部署变为 **Live** 后打开 `https://<服务名>.onrender.com/api/health`，确认 `database.engine` 为 `postgresql`。
+8. 注册测试账号、保存项目，再在服务页执行 **Manual Deploy > Deploy latest commit**；重新部署后确认数据仍存在。
+
+Render Free 的文件系统是临时的，因此长期方案必须使用 Neon PostgreSQL，不能使用 SQLite。生产环境变量可参考 `.env.production.example`，关键值为：
 
 ```env
-ADMIN_TOKEN=强随机令牌
 ADMIN_EMAILS=你的邮箱@example.com
 ADMIN_DEFAULT_PASSWORD=强随机管理员密码
 PHONE_CODE_DEV_MODE=0
 APP_SECURE_COOKIES=1
 APP_DATA_DIR=/data
-DATABASE_URL=sqlite:////data/app.db
+EMAIL_VERIFICATION_MODE=off
+DATABASE_URL=postgresql://user:password@host/database?sslmode=require
 PROJECT_LIMIT_PER_OWNER=20
 AI_DAILY_LIMIT_PER_OWNER=20
 ```
@@ -83,11 +95,10 @@ AI_DAILY_LIMIT_PER_OWNER=20
 .\scripts\backup-db.ps1
 ```
 
-容器平台方案：
+Render + Neon 方案：
 
-- 优先使用平台的磁盘快照；
-- 或定期下载 `/data/app.db`；
-- 备份前最好暂停写入，避免复制到不完整状态。
+- 在 Neon 控制台使用项目提供的备份、分支或导出能力；
+- 不要尝试从 Render 的 `/data` 备份 SQLite，长期数据不应存放在那里。
 
 ## 不建议现在就做的事
 
@@ -101,5 +112,5 @@ AI_DAILY_LIMIT_PER_OWNER=20
 1. 本机跑通。
 2. 本机 Tunnel 给 1-3 个人试用。
 3. 修正模板、权限和 AI 额度。
-4. 再迁移到有持久磁盘的长期部署平台。
-5. 用户和数据明显增长后，再从 SQLite 升级到 PostgreSQL。
+4. 用 Render + Neon 建立长期公开地址。
+5. 用户和数据明显增长后，再评估付费实例、备份和监控。

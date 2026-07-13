@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: construction-schedule-ai
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_HOST
+        value: 0.0.0.0
+      - key: APP_SECURE_COOKIES
+        value: "1"
+      - key: PHONE_CODE_DEV_MODE
+        value: "0"
+      - key: EMAIL_VERIFICATION_MODE
+        value: off
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: ADMIN_DEFAULT_PASSWORD
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false

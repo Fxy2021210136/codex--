@@ -8,10 +8,38 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from serve import CodexAgent, call_ai_provider, create_server, parse_model_json
+from serve import (
+    CodexAgent,
+    HybridRow,
+    PostgresDatabase,
+    SQLiteDatabase,
+    call_ai_provider,
+    create_server,
+    database_from_configuration,
+    parse_model_json,
+)
 
 
 class ProjectApiTest(unittest.TestCase):
+    def test_database_configuration_keeps_sqlite_and_selects_postgres(self):
+        sqlite_database = database_from_configuration("", self.db_file)
+        self.assertIsInstance(sqlite_database, SQLiteDatabase)
+        self.assertEqual(sqlite_database.engine, "sqlite")
+        self.assertEqual(sqlite_database.path, self.db_file)
+
+        postgres_database = database_from_configuration("postgresql://user:secret@db.example/app")
+        self.assertIsInstance(postgres_database, PostgresDatabase)
+        self.assertEqual(postgres_database.engine, "postgresql")
+        self.assertEqual(postgres_database.label, "postgresql")
+        self.assertNotIn("secret", repr(postgres_database))
+
+    def test_hybrid_row_supports_index_name_and_unpacking(self):
+        row = HybridRow(("count", "success"), (4, 3))
+        self.assertEqual(row[0], 4)
+        self.assertEqual(row["success"], 3)
+        total, success = row
+        self.assertEqual((total, success), (4, 3))
+
     def test_model_json_repair(self):
         repaired = parse_model_json('```json\n{"summary":"ok","items":[1,2,],}\n```')
         self.assertEqual(repaired["summary"], "ok")

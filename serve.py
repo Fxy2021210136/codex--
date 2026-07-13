@@ -229,6 +229,9 @@ class HybridRow:
     def __iter__(self):
         return iter(self.values)
 
+    def keys(self):
+        return self.names
+
 
 def _postgres_row_factory(cursor):
     names = tuple(column.name for column in cursor.description)
@@ -2057,7 +2060,7 @@ def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None,
     configured_codex_agent = codex_agent or CodexAgent()
     legacy_file_mode = any(value is not None for value in (data_file, ai_settings_file, auth_file, templates_file))
     use_database = (not legacy_file_mode) if use_sqlite is None else bool(use_sqlite)
-    database = database_from_configuration(database_file=database_file) if use_database else None
+    database = database_from_configuration("", database_file) if use_database else None
     if database:
         migrate_json_files_to_sqlite(
             database,

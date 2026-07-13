@@ -39,6 +39,16 @@ class ProjectApiTest(unittest.TestCase):
         self.assertEqual(row["success"], 3)
         total, success = row
         self.assertEqual((total, success), (4, 3))
+        self.assertEqual(dict(row), {"count": 4, "success": 3})
+
+    def test_server_keeps_json_migration_on_sqlite_during_adapter_stage(self):
+        with patch.dict("os.environ", {"DATABASE_URL": "postgresql://user:secret@db.example/app"}):
+            with patch("serve.migrate_json_files_to_sqlite") as mocked_migration:
+                server = create_server(port=0, static_root=Path(self.temp.name), database_file=self.db_file, use_sqlite=True)
+        try:
+            self.assertIsInstance(mocked_migration.call_args.args[0], SQLiteDatabase)
+        finally:
+            server.server_close()
 
     def test_model_json_repair(self):
         repaired = parse_model_json('```json\n{"summary":"ok","items":[1,2,],}\n```')

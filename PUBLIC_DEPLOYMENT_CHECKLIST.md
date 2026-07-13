@@ -18,6 +18,8 @@
    ```env
    ADMIN_TOKEN=上一步生成的长令牌
    ADMIN_EMAILS=你的邮箱@example.com
+   ADMIN_DEFAULT_PASSWORD=本机测试可保留177099
+   PHONE_CODE_DEV_MODE=1
    APP_SECURE_COOKIES=0
    APP_DATA_DIR=./data
    PROJECT_LIMIT_PER_OWNER=20
@@ -57,6 +59,8 @@
 ```env
 ADMIN_TOKEN=强随机令牌
 ADMIN_EMAILS=你的邮箱@example.com
+ADMIN_DEFAULT_PASSWORD=强随机管理员密码
+PHONE_CODE_DEV_MODE=0
 APP_SECURE_COOKIES=1
 APP_DATA_DIR=/data
 DATABASE_URL=sqlite:////data/app.db
@@ -69,7 +73,7 @@ AI_DAILY_LIMIT_PER_OWNER=20
 1. 用管理员邮箱注册/登录。
 2. 打开“系统设置”。
 3. 运行“上线健康检查”。
-4. 如果数据目录或数据库不是绿色，不要正式开放给别人保存项目。
+4. 如果数据目录、数据库、管理员密码或验证码模式不是绿色，不要正式开放给别人保存项目。
 
 ## 数据备份
 

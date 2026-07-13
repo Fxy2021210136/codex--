@@ -15,5 +15,6 @@ data/*.db-*
 data/*.sqlite
 data/*.sqlite-*
 backups/
+.worktrees/
 AGENTS.md
 !data/.gitkeep

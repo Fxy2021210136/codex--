@@ -102,6 +102,65 @@ class ProjectApiTest(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    @patch("serve.database_from_configuration")
+    def test_postgres_startup_failure_is_propagated_without_json_migration(self, factory):
+        credential_error = "cannot connect to postgresql://user:secret@host/db"
+
+        class FailingPostgresDatabase:
+            engine = "postgresql"
+
+            def ensure_schema(self):
+                raise RuntimeError(credential_error)
+
+        factory.return_value = FailingPostgresDatabase()
+        with patch("serve.migrate_json_files_to_sqlite") as migration:
+            with self.assertRaisesRegex(RuntimeError, credential_error) as raised:
+                create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        self.assertEqual(str(raised.exception), credential_error)
+        migration.assert_not_called()
+
+    @patch("serve.database_from_configuration")
+    def test_postgres_readiness_error_does_not_expose_database_credentials(self, factory):
+        credential_url = "postgresql://user:secret@host/db"
+        backing = SQLiteDatabase(Path(self.temp.name) / "readiness-fake.db")
+
+        class FailingPostgresDatabase:
+            engine = "postgresql"
+            label = "postgresql"
+            path = None
+            lock = backing.lock
+
+            def __init__(self):
+                self.connect_calls = 0
+
+            def ensure_schema(self):
+                backing.ensure_schema()
+
+            def connect(self):
+                self.connect_calls += 1
+                if self.connect_calls == 1:
+                    raise RuntimeError(f"cannot connect to {credential_url}")
+                return backing.connect()
+
+        factory.return_value = FailingPostgresDatabase()
+        server = create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{server.server_port}/api/readiness") as response:
+                body = response.read().decode("utf-8")
+            readiness = json.loads(body)
+            database_check = next(item for item in readiness["checks"] if item["key"] == "database")
+            self.assertEqual(database_check["level"], "error")
+            self.assertEqual(database_check["detail"], "数据库不可用，请检查服务端配置和运行日志。")
+            self.assertNotIn(credential_url, body)
+            self.assertNotIn("user", body)
+            self.assertNotIn("secret", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_model_json_repair(self):
         repaired = parse_model_json('```json\n{"summary":"ok","items":[1,2,],}\n```')
         self.assertEqual(repaired["summary"], "ok")

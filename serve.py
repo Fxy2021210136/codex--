@@ -1784,8 +1784,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 add("database", "数据库连接", "ok", f"{database.label} 可连接，核心表结构已初始化。", True)
             else:
                 add("database", "数据库连接", "warning", "当前使用 JSON 文件存储；多人长期使用建议切换 SQLite。", False)
-        except Exception as error:
-            add("database", "数据库连接", "error", f"数据库不可用：{error}", True)
+        except Exception:
+            add("database", "数据库连接", "error", "数据库不可用，请检查服务端配置和运行日志。", True)
 
         if self.admin_token:
             add("adminToken", "管理员令牌", "ok", "ADMIN_TOKEN 已配置，公网后台和模型设置受保护。", True)

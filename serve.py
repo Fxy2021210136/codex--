@@ -44,6 +44,7 @@ SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", str(60 * 60 * 24
 PROJECT_LIMIT_PER_OWNER = int(os.environ.get("PROJECT_LIMIT_PER_OWNER", "20"))
 AI_DAILY_LIMIT_PER_OWNER = int(os.environ.get("AI_DAILY_LIMIT_PER_OWNER", "20"))
 ADMIN_DEFAULT_PASSWORD = os.environ.get("ADMIN_DEFAULT_PASSWORD", "177099")
+ADMIN_DEFAULT_PASSWORD_IS_LOCAL = "ADMIN_DEFAULT_PASSWORD" not in os.environ and ADMIN_DEFAULT_PASSWORD == "177099"
 PHONE_CODE_DEV_MODE = os.environ.get("PHONE_CODE_DEV_MODE", "1") == "1"
 SUPPORTED_AI_PROVIDERS = {"deepseek", "gemini", "openai"}
 AI_PROVIDER_HOSTS = {"deepseek": "api.deepseek.com", "gemini": "generativelanguage.googleapis.com", "openai": "api.openai.com"}
@@ -1417,6 +1418,12 @@ class AppHandler(SimpleHTTPRequestHandler):
         local_ok = self.allow_local_admin and self.client_address[0] in {"127.0.0.1", "::1"}
         return token_ok or role_ok or (local_ok and not self.admin_token)
 
+    def _default_admin_password_blocked(self):
+        return ADMIN_DEFAULT_PASSWORD_IS_LOCAL and not self.allow_local_admin
+
+    def _phone_code_dev_mode_blocked(self):
+        return PHONE_CODE_DEV_MODE and not self.allow_local_admin
+
     def _project_quota(self, owner):
         count = self.store.count(owner) if hasattr(self.store, "count") else len(self.store.list(owner))
         exempt = owner == "local" or self._is_admin()
@@ -1641,6 +1648,16 @@ class AppHandler(SimpleHTTPRequestHandler):
         else:
             add("adminToken", "管理员令牌", "warning", "未配置 ADMIN_TOKEN；本机可调试，公网部署前必须设置。", True)
 
+        if ADMIN_DEFAULT_PASSWORD_IS_LOCAL:
+            add("adminPassword", "管理员密码", "error", "仍在使用本地默认管理员密码 177099；公网部署前必须设置 ADMIN_DEFAULT_PASSWORD。", True)
+        else:
+            add("adminPassword", "管理员密码", "ok", "ADMIN_DEFAULT_PASSWORD 已显式配置。", True)
+
+        if PHONE_CODE_DEV_MODE:
+            add("phoneCode", "手机验证码", "error", "PHONE_CODE_DEV_MODE 仍为 1；公网部署不能把验证码返回给浏览器。", True)
+        else:
+            add("phoneCode", "手机验证码", "ok", "PHONE_CODE_DEV_MODE 已关闭。", True)
+
         if os.environ.get("APP_SECURE_COOKIES", "").strip() in {"1", "true", "TRUE", "yes"}:
             add("secureCookies", "安全 Cookie", "ok", "APP_SECURE_COOKIES 已启用，适合 HTTPS 部署。")
         else:
@@ -1799,6 +1816,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return self._send_json(401, {"error": str(error)})
         if path == "/api/auth/admin-login":
             try:
+                if self._default_admin_password_blocked():
+                    return self._send_json(403, {"error": "默认管理员密码仅限本地使用；公网部署请设置 ADMIN_DEFAULT_PASSWORD。"})
                 payload = self._read_json()
                 user = self.auth_store.admin_login(payload.get("email"), payload.get("password"))
                 token = self.auth_store.create_session(user["id"])
@@ -1807,6 +1826,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return self._send_json(401, {"error": str(error)})
         if path == "/api/auth/phone-code":
             try:
+                if self._phone_code_dev_mode_blocked():
+                    return self._send_json(403, {"error": "本地测试验证码模式仅限本机使用；公网部署请设置 PHONE_CODE_DEV_MODE=0 并接入短信服务。"})
                 payload = self._read_json()
                 issued = self._issue_phone_code(payload.get("phone"))
                 return self._send_json(200, {"sent": True, **issued})

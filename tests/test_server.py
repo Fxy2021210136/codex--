@@ -124,7 +124,7 @@ class ProjectApiTest(unittest.TestCase):
         self.assertIn("schedule_ai_session=", login_headers["Set-Cookie"])
 
     def test_admin_default_login_and_phone_code_login(self):
-        self.server.RequestHandlerClass.allow_local_admin = False
+        self.server.RequestHandlerClass.allow_local_admin = True
         status, admin, admin_headers = self.request_raw(
             "/api/auth/admin-login",
             "POST",
@@ -163,6 +163,22 @@ class ProjectApiTest(unittest.TestCase):
         self.assertTrue(phone_login["authenticated"])
         self.assertEqual(phone_login["user"]["email"], "phone@example.com")
         self.assertIn("schedule_ai_session=", phone_headers["Set-Cookie"])
+
+    def test_default_admin_password_is_local_only(self):
+        self.server.RequestHandlerClass.allow_local_admin = False
+        with self.assertRaises(HTTPError) as blocked:
+            self.request(
+                "/api/auth/admin-login",
+                "POST",
+                {"email": "admin@example.com", "password": "177099"},
+            )
+        self.assertEqual(blocked.exception.code, 403)
+
+    def test_phone_code_dev_mode_is_local_only(self):
+        self.server.RequestHandlerClass.allow_local_admin = False
+        with self.assertRaises(HTTPError) as blocked:
+            self.request("/api/auth/phone-code", "POST", {"phone": "13800138000"})
+        self.assertEqual(blocked.exception.code, 403)
 
     def test_legacy_user_table_without_phone_column_migrates(self):
         legacy_db = Path(self.temp.name) / "legacy-no-phone.db"
@@ -405,11 +421,13 @@ class ProjectApiTest(unittest.TestCase):
         self.assertEqual(forbidden.exception.code, 403)
 
         _, readiness = self.request("/api/readiness", headers={"X-Admin-Token": "admin-secret"})
-        self.assertTrue(readiness["ready"])
+        self.assertFalse(readiness["ready"])
         checks = {item["key"]: item for item in readiness["checks"]}
         self.assertEqual(checks["storageWritable"]["level"], "ok")
         self.assertEqual(checks["database"]["level"], "ok")
         self.assertEqual(checks["adminToken"]["level"], "ok")
+        self.assertEqual(checks["adminPassword"]["level"], "error")
+        self.assertEqual(checks["phoneCode"]["level"], "error")
         self.assertIn("warningCount", readiness)
 
     @patch("serve.call_ai_provider")

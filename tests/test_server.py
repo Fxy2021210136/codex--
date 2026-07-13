@@ -1,3 +1,4 @@
+import builtins
 import json
 import sqlite3
 import tempfile
@@ -164,6 +165,96 @@ class ProjectApiTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    @patch("serve.database_from_configuration")
+    def test_health_queries_database_and_redacts_connection_failure(self, factory):
+        credential_url = "postgresql://user:secret@host/db"
+        backing = SQLiteDatabase(Path(self.temp.name) / "health-fake.db")
+
+        class FailingPostgresDatabase:
+            engine = "postgresql"
+            label = "postgresql"
+            path = None
+            lock = backing.lock
+
+            def __init__(self):
+                self.connect_calls = 0
+
+            def ensure_schema(self):
+                backing.ensure_schema()
+
+            def connect(self):
+                self.connect_calls += 1
+                if self.connect_calls == 1:
+                    return backing.connect()
+                raise sqlite3.OperationalError(f"cannot connect to {credential_url}")
+
+        factory.return_value = FailingPostgresDatabase()
+        server = create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(f"http://127.0.0.1:{server.server_port}/api/health")
+            body = raised.exception.read().decode("utf-8")
+            health = json.loads(body)
+            self.assertEqual(raised.exception.code, 503)
+            self.assertFalse(health["ok"])
+            self.assertEqual(health["database"], {"engine": "postgresql", "connected": False})
+            self.assertEqual(health["error"], "数据库暂时不可用，请稍后重试。")
+            self.assertNotIn(credential_url, body)
+            self.assertNotIn("secret", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    @patch("serve.database_from_configuration")
+    def test_database_runtime_error_has_stable_redacted_http_response(self, factory):
+        credential_url = "postgresql://user:secret@host/db"
+        backing = SQLiteDatabase(Path(self.temp.name) / "request-fake.db")
+
+        class FailingPostgresDatabase:
+            engine = "postgresql"
+            label = "postgresql"
+            path = None
+            lock = backing.lock
+
+            def ensure_schema(self):
+                backing.ensure_schema()
+
+            def connect(self):
+                raise sqlite3.OperationalError(f"query failed for {credential_url}")
+
+        factory.return_value = FailingPostgresDatabase()
+        server = create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(f"http://127.0.0.1:{server.server_port}/api/projects")
+            body = raised.exception.read().decode("utf-8")
+            self.assertEqual(raised.exception.code, 503)
+            self.assertEqual(json.loads(body), {"ok": False, "error": "数据库暂时不可用，请稍后重试。"})
+            self.assertNotIn(credential_url, body)
+            self.assertNotIn("secret", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_missing_psycopg_keeps_actionable_startup_message(self):
+        original_import = builtins.__import__
+
+        def missing_psycopg(name, *args, **kwargs):
+            if name == "psycopg":
+                raise ImportError("missing psycopg")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=missing_psycopg):
+            with self.assertRaises(RuntimeError) as raised:
+                create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        self.assertEqual(str(raised.exception), "PostgreSQL 已配置，但未安装 psycopg；请安装 requirements.txt")
 
     def test_model_json_repair(self):
         repaired = parse_model_json('```json\n{"summary":"ok","items":[1,2,],}\n```')

@@ -342,6 +342,10 @@ def database_from_configuration(database_url=None, database_file=None):
     return SQLiteDatabase(Path(database_file) if database_file else Path(os.environ.get("APP_DB_FILE") or (DATA_DIR / "app.db")))
 
 
+def _is_database_error(error):
+    return isinstance(error, sqlite3.Error) or type(error).__module__.split(".", 1)[0] == "psycopg"
+
+
 class ProjectStore:
     def __init__(self, path: Path):
         self.path = path
@@ -1838,7 +1842,14 @@ class AppHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/health":
-            return self._send_json(200, {"ok": True, "storage": self.storage_label, "database": {"engine": getattr(getattr(self.store, "database", None), "engine", "json"), "connected": True}, "publicReady": self._public_ready(), "auth": True, "phoneAuth": self._phone_auth_public(), "emailAuth": self._email_auth_public(), "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
+            database = getattr(self.store, "database", None)
+            try:
+                if database:
+                    with database.lock, database.connect() as connection:
+                        connection.execute("SELECT 1").fetchone()
+                return self._send_json(200, {"ok": True, "storage": self.storage_label, "database": {"engine": getattr(database, "engine", "json"), "connected": True}, "publicReady": self._public_ready(), "auth": True, "phoneAuth": self._phone_auth_public(), "emailAuth": self._email_auth_public(), "ai": self.ai_store.public(), "codex": self.codex_agent.public()})
+            except Exception:
+                return self._send_json(503, {"ok": False, "storage": self.storage_label, "database": {"engine": getattr(database, "engine", "json"), "connected": False}, "error": "数据库暂时不可用，请稍后重试。"})
         if path == "/api/auth/me":
             user = self._current_user()
             owner = self._client_id()
@@ -2056,6 +2067,14 @@ class AppHandler(SimpleHTTPRequestHandler):
             self._record_ai_usage(owner, config, False, "network_error", started_at, "NetworkError")
             return self._send_json(502, {"error": "无法连接模型服务"})
 
+    def handle_one_request(self):
+        try:
+            return super().handle_one_request()
+        except Exception as error:
+            if not _is_database_error(error):
+                raise
+            return self._send_json(503, {"ok": False, "error": "数据库暂时不可用，请稍后重试。"})
+
 
 def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None, ai_settings_file=None, auth_file=None, templates_file=None, database_file=None, database_url=None, use_sqlite=None, admin_token=None, allowed_origins=None, ai_rate_limit=None, project_limit_per_owner=None, ai_daily_limit_per_owner=None, login_failure_limit=None, codex_agent=None):
     configured_admin_token = os.environ.get("ADMIN_TOKEN", "") if admin_token is None else admin_token
@@ -2071,6 +2090,10 @@ def create_server(host="127.0.0.1", port=4173, static_root=None, data_file=None,
     if database:
         try:
             database.ensure_schema()
+        except RuntimeError as error:
+            if isinstance(error.__cause__, ImportError):
+                raise RuntimeError("PostgreSQL 已配置，但未安装 psycopg；请安装 requirements.txt") from None
+            raise RuntimeError("数据库初始化失败，请检查服务端配置。") from None
         except Exception:
             raise RuntimeError("数据库初始化失败，请检查服务端配置。") from None
         if database.engine == "sqlite":

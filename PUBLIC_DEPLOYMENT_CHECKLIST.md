@@ -1,6 +1,6 @@
 # 公开使用上线清单
 
-这份清单提供两条免费路线：长期公开访问用 Render + Neon；无需云账号的临时演示继续用本机 SQLite + Tunnel。
+这份清单提供两条免费路线：固定公网地址的公开内测/试用用 Render + Neon；无需云账号的临时演示继续用本机 SQLite + Tunnel。
 
 > 代码完成并推送到 GitHub 前无需操作 Neon 或 Render。
 
@@ -46,9 +46,9 @@
 
 注意：你的电脑关机、断网或程序停止后，别人就不能访问；Tunnel 临时地址也可能变化。
 
-## 方案 B：长期公开访问，Render Free + Neon Free
+## 方案 B：免费公开内测/试用，Render Free + Neon Free
 
-适合：希望别人长期打开一个固定网址使用。
+适合：希望别人通过固定网址参加公开内测或试用；不适合作为生产稳定长期服务。
 
 1. 在 Neon 点击 **Sign up with GitHub**，登录后点击 **New project**，创建 Free 项目。
 2. 打开项目的 **Connect** 页面，复制 PostgreSQL 连接字符串，并确认包含 `sslmode=require`。
@@ -66,7 +66,7 @@
 7. 部署变为 **Live** 后打开 `https://<服务名>.onrender.com/api/health`，确认 `database.engine` 为 `postgresql`。
 8. 注册测试账号、保存项目，再在服务页执行 **Manual Deploy > Deploy latest commit**；重新部署后确认数据仍存在。
 
-Render Free 的文件系统是临时的，因此长期方案必须使用 Neon PostgreSQL，不能使用 SQLite。生产环境变量可参考 `.env.production.example`，关键值为：
+Render Free 的文件系统是临时的，因此该路线必须使用 Neon PostgreSQL，不能使用 SQLite。Render 和 Neon 的免费计划都有月度额度与平台限制，闲置时可能休眠，额度耗尽或平台策略变化时可能暂停服务或要求升级；具体额度以平台当期控制台和官方说明为准。环境变量可参考 `.env.production.example`，关键值为：
 
 ```env
 ADMIN_EMAILS=你的邮箱@example.com
@@ -105,12 +105,12 @@ Render + Neon 方案：
 - 不建议把 `data/app.db` 上传到 GitHub。
 - 不建议在匿名公共站点开放 Codex 写入权限。
 - 不建议把 API Key 写到前端代码或仓库文件。
-- 不建议没有持久磁盘就长期开放注册登录，因为重新部署会丢数据。
+- 本机或其他 SQLite 容器路线没有持久磁盘时，不建议开放注册登录，因为重新部署会丢失 `app.db`；Render + Neon 路线的数据保存在 PostgreSQL，不依赖 Render 磁盘。
 
 ## 推荐上线顺序
 
 1. 本机跑通。
 2. 本机 Tunnel 给 1-3 个人试用。
 3. 修正模板、权限和 AI 额度。
-4. 用 Render + Neon 建立长期公开地址。
+4. 用 Render + Neon 建立固定的公开内测地址。
 5. 用户和数据明显增长后，再评估付费实例、备份和监控。

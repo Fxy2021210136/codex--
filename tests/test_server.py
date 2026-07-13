@@ -1,17 +1,272 @@
+import builtins
 import json
 import sqlite3
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from serve import CodexAgent, call_ai_provider, create_server, parse_model_json
+from serve import (
+    AppHandler,
+    CodexAgent,
+    HybridRow,
+    PostgresDatabase,
+    SQLiteDatabase,
+    call_ai_provider,
+    create_server,
+    database_from_configuration,
+    parse_model_json,
+    _postgres_row_factory,
+)
 
 
 class ProjectApiTest(unittest.TestCase):
+    def test_database_configuration_keeps_sqlite_and_selects_postgres(self):
+        sqlite_database = database_from_configuration("", self.db_file)
+        self.assertIsInstance(sqlite_database, SQLiteDatabase)
+        self.assertEqual(sqlite_database.engine, "sqlite")
+        self.assertEqual(sqlite_database.path, self.db_file)
+
+        postgres_database = database_from_configuration("postgresql://user:secret@db.example/app")
+        self.assertIsInstance(postgres_database, PostgresDatabase)
+        self.assertEqual(postgres_database.engine, "postgresql")
+        self.assertEqual(postgres_database.label, "postgresql")
+        self.assertNotIn("secret", repr(postgres_database))
+
+    def test_hybrid_row_supports_index_name_and_unpacking(self):
+        row = HybridRow(("count", "success"), (4, 3))
+        self.assertEqual(row[0], 4)
+        self.assertEqual(row["success"], 3)
+        total, success = row
+        self.assertEqual((total, success), (4, 3))
+        self.assertEqual(dict(row), {"count": 4, "success": 3})
+
+    def test_postgres_row_factory_accepts_commands_without_result_columns(self):
+        row = _postgres_row_factory(SimpleNamespace(description=None))([])
+        self.assertEqual(dict(row), {})
+
+    def test_server_keeps_json_migration_on_sqlite_during_adapter_stage(self):
+        with patch.dict("os.environ", {"DATABASE_URL": "postgresql://user:secret@db.example/app"}):
+            with patch("serve.migrate_json_files_to_sqlite") as mocked_migration:
+                server = create_server(port=0, static_root=Path(self.temp.name), database_file=self.db_file, database_url="", use_sqlite=True)
+        try:
+            self.assertIsInstance(mocked_migration.call_args.args[0], SQLiteDatabase)
+        finally:
+            server.server_close()
+
+    @patch("serve.database_from_configuration")
+    def test_create_server_uses_explicit_database_url(self, factory):
+        database = SQLiteDatabase(self.db_file)
+        factory.return_value = database
+        server = create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        try:
+            factory.assert_called_once_with("postgresql://redacted", None)
+            self.assertIs(server.RequestHandlerClass.store.database, database)
+        finally:
+            server.server_close()
+
+    @patch("serve.database_from_configuration")
+    def test_postgres_database_health_readiness_and_admin_overview_do_not_probe_a_file(self, factory):
+        backing = SQLiteDatabase(Path(self.temp.name) / "postgres-fake.db")
+
+        class FakePostgresDatabase:
+            engine = "postgresql"
+            label = "postgresql"
+            path = None
+            lock = backing.lock
+
+            def ensure_schema(self):
+                backing.ensure_schema()
+
+            def connect(self):
+                return backing.connect()
+
+        factory.return_value = FakePostgresDatabase()
+        with patch("serve.migrate_json_files_to_sqlite") as migration:
+            server = create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        migration.assert_not_called()
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            with urlopen(f"{base}/api/health") as response:
+                health = json.loads(response.read().decode("utf-8"))
+            with urlopen(f"{base}/api/admin/overview") as response:
+                overview = json.loads(response.read().decode("utf-8"))
+            with urlopen(f"{base}/api/readiness") as response:
+                readiness = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(health["database"], {"engine": "postgresql", "connected": True})
+            self.assertEqual(overview["storage"], {"engine": "postgresql", "label": "postgresql", "path": "", "exists": True, "sizeBytes": 0, "updatedAt": ""})
+            checks = {item["key"]: item for item in readiness["checks"]}
+            self.assertEqual(checks["storageWritable"]["level"], "ok")
+            self.assertEqual(checks["database"]["level"], "ok")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    @patch("serve.database_from_configuration")
+    def test_postgres_startup_failure_is_sanitized_without_json_migration(self, factory):
+        credential_error = "cannot connect to postgresql://user:secret@host/db"
+
+        class FailingPostgresDatabase:
+            engine = "postgresql"
+
+            def ensure_schema(self):
+                raise RuntimeError(credential_error)
+
+        factory.return_value = FailingPostgresDatabase()
+        with patch("serve.migrate_json_files_to_sqlite") as migration:
+            with self.assertRaises(RuntimeError) as raised:
+                create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        message = str(raised.exception)
+        self.assertEqual(message, "数据库初始化失败，请检查服务端配置。")
+        self.assertNotIn("postgresql://user:secret@host/db", message)
+        self.assertNotIn("user", message)
+        self.assertNotIn("secret", message)
+        migration.assert_not_called()
+
+    @patch("serve.database_from_configuration")
+    def test_postgres_readiness_error_does_not_expose_database_credentials(self, factory):
+        credential_url = "postgresql://user:secret@host/db"
+        backing = SQLiteDatabase(Path(self.temp.name) / "readiness-fake.db")
+
+        class FailingPostgresDatabase:
+            engine = "postgresql"
+            label = "postgresql"
+            path = None
+            lock = backing.lock
+
+            def __init__(self):
+                self.connect_calls = 0
+
+            def ensure_schema(self):
+                backing.ensure_schema()
+
+            def connect(self):
+                self.connect_calls += 1
+                if self.connect_calls == 1:
+                    raise RuntimeError(f"cannot connect to {credential_url}")
+                return backing.connect()
+
+        factory.return_value = FailingPostgresDatabase()
+        server = create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urlopen(f"http://127.0.0.1:{server.server_port}/api/readiness") as response:
+                body = response.read().decode("utf-8")
+            readiness = json.loads(body)
+            database_check = next(item for item in readiness["checks"] if item["key"] == "database")
+            self.assertEqual(database_check["level"], "error")
+            self.assertEqual(database_check["detail"], "数据库不可用，请检查服务端配置和运行日志。")
+            self.assertNotIn(credential_url, body)
+            self.assertNotIn("user", body)
+            self.assertNotIn("secret", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    @patch("serve.database_from_configuration")
+    def test_health_queries_database_and_redacts_connection_failure(self, factory):
+        credential_url = "postgresql://user:secret@host/db"
+        backing = SQLiteDatabase(Path(self.temp.name) / "health-fake.db")
+
+        class FailingPostgresDatabase:
+            engine = "postgresql"
+            label = "postgresql"
+            path = None
+            lock = backing.lock
+
+            def ensure_schema(self):
+                backing.ensure_schema()
+
+            def connect(self):
+                raise sqlite3.OperationalError(f"cannot connect to {credential_url}")
+
+        factory.return_value = FailingPostgresDatabase()
+        server = create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(f"http://127.0.0.1:{server.server_port}/api/health")
+            body = raised.exception.read().decode("utf-8")
+            health = json.loads(body)
+            self.assertEqual(raised.exception.code, 503)
+            self.assertFalse(health["ok"])
+            self.assertEqual(health["database"], {"engine": "postgresql", "connected": False})
+            self.assertEqual(health["error"], "数据库暂时不可用，请稍后重试。")
+            self.assertNotIn(credential_url, body)
+            self.assertNotIn("secret", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_health_does_not_misreport_non_database_failure(self):
+        handler = object.__new__(AppHandler)
+        handler.path = "/api/health"
+        handler.store = SimpleNamespace(database=None)
+        handler.storage_label = "test"
+        handler._public_ready = lambda: (_ for _ in ()).throw(RuntimeError("non-database failure"))
+        handler._send_json = lambda *args: args
+        with self.assertRaisesRegex(RuntimeError, "non-database failure"):
+            handler.do_GET()
+
+    @patch("serve.database_from_configuration")
+    def test_database_runtime_error_has_stable_redacted_http_response(self, factory):
+        credential_url = "postgresql://user:secret@host/db"
+        backing = SQLiteDatabase(Path(self.temp.name) / "request-fake.db")
+
+        class FailingPostgresDatabase:
+            engine = "postgresql"
+            label = "postgresql"
+            path = None
+            lock = backing.lock
+
+            def ensure_schema(self):
+                backing.ensure_schema()
+
+            def connect(self):
+                raise sqlite3.OperationalError(f"query failed for {credential_url}")
+
+        factory.return_value = FailingPostgresDatabase()
+        server = create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(f"http://127.0.0.1:{server.server_port}/api/projects")
+            body = raised.exception.read().decode("utf-8")
+            self.assertEqual(raised.exception.code, 503)
+            self.assertEqual(json.loads(body), {"ok": False, "error": "数据库暂时不可用，请稍后重试。"})
+            self.assertNotIn(credential_url, body)
+            self.assertNotIn("secret", body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_missing_psycopg_keeps_actionable_startup_message(self):
+        original_import = builtins.__import__
+
+        def missing_psycopg(name, *args, **kwargs):
+            if name == "psycopg":
+                raise ImportError("missing psycopg")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=missing_psycopg):
+            with self.assertRaises(RuntimeError) as raised:
+                create_server(port=0, static_root=Path(self.temp.name), database_url="postgresql://redacted")
+        self.assertEqual(str(raised.exception), "PostgreSQL 已配置，但未安装 psycopg；请安装 requirements.txt")
+
     def test_model_json_repair(self):
         repaired = parse_model_json('```json\n{"summary":"ok","items":[1,2,],}\n```')
         self.assertEqual(repaired["summary"], "ok")
@@ -425,6 +680,7 @@ class ProjectApiTest(unittest.TestCase):
         self.assertFalse(health["publicReady"])
         self.assertFalse(health["phoneAuth"]["enabled"])
         self.assertTrue(health["emailAuth"]["enabled"])
+        self.assertEqual(health["database"], {"engine": "sqlite", "connected": True})
 
         with self.assertRaises(HTTPError) as forbidden:
             self.request("/api/readiness")
